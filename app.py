@@ -73,7 +73,7 @@ def save_history_entry(generated_text, ai_success, selected_task, difficulty, fo
          st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
 
 # --- 4. APP SETUP ---
-st.title("💡 Study-Mixer - 資料形式を選ばないAI学習支援")
+st.title("📚 Study-Mixer - AI学習支援")
 st.markdown("---")
 
 # --- 5. API KEY CONFIGURATION ---
@@ -117,14 +117,27 @@ with st.sidebar:
     generate_button = st.button(button_label, key="generate_button") 
 
     # History Selection (Display in Sidebar)
-    st.markdown("---")
+    st.markdown("---") 
     st.header("📄 分析履歴")
 
     if not st.session_state['analysis_history']:
         st.caption("まだ履歴はありません。")
     else:
-        history_titles = [f"{i+1}: {entry['task']} ({entry['file_name'][:20]})" 
-                          for i, entry in enumerate(st.session_state['analysis_history'])]
+        # Generate display titles (with less truncation than before)
+        history_titles = []
+        for i, entry in enumerate(st.session_state['analysis_history']):
+            # オプションの難易度や形式をタイトルに含める
+            display_str = f"{entry['task']} ({entry['file_name'][:15]}...)"
+            if entry['task'] == "問題を生成する" and entry['options']:
+                difficulty_str = entry['options'].get('難易度', '標準')
+                format_str = entry['options'].get('形式', '論述')
+                display_str = f"[{difficulty_str} / {format_str}] {entry['file_name'][:15]}..."
+            elif entry['task'] == "要約を作成する" and entry['options']:
+                 length_str = entry['options'].get('長さ', '普通')
+                 display_str = f"[要約: {length_str}] {entry['file_name'][:15]}..."
+
+            history_titles.append(f"{i+1}: {display_str}")
+
         options_with_placeholder = ["履歴を選択..."] + history_titles
 
         selected_history_display = st.selectbox(
@@ -136,16 +149,29 @@ with st.sidebar:
 
         if selected_history_display != "履歴を選択...":
             try:
-                selected_index = history_titles.index(selected_history_display)
+                # Find the corresponding entry
+                selected_index = options_with_placeholder.index(selected_history_display) - 1 # -1 for placeholder
                 selected_entry = st.session_state['analysis_history'][selected_index]
-
+                
+                # --- サイドバーでの詳細表示 ---
+                st.subheader(f"選択履歴 {selected_index + 1} の詳細:")
+                st.caption(f"**タスク:** {selected_entry['task']}")
+                st.caption(f"**ファイル:** {selected_entry['file_name']}")
+                
+                if selected_entry['options']:
+                    st.markdown("---")
+                    st.caption("**実行オプション:**")
+                    for k, v in selected_entry['options'].items():
+                         st.write(f"- **{k}**: {v}")
+                
+                # --- メインエリアの表示を更新 ---
                 if st.session_state.get('displayed_history_index') != selected_index:
                     st.session_state['generated_content'] = selected_entry['result']
                     st.session_state.displayed_history_index = selected_index
-                    # st.rerun()は不要です
+                    st.rerun() 
 
             except (ValueError, IndexError):
-                 st.sidebar.warning("履歴の表示中にエラーが発生しました。")
+                 st.sidebar.warning("履歴の表示中にエラーが発生しました。", icon="⚠️")
 
 # --- 7. FILE UPLOADER ---
 def reset_history_selection_on_upload():
@@ -299,4 +325,5 @@ if generate_button and uploaded_file is not None:
 if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
+
 
