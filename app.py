@@ -45,6 +45,8 @@ def save_history_entry(generated_text, ai_success, selected_task, difficulty, fo
              current_options = {"難易度": difficulty, "形式": format_type, "焦点": professor_focus}
         elif selected_task == "要約を作成する":
              current_options = {"長さ": summary_length}
+        elif selected_task == "リアクションペーパー作成": # ★ このelifブロックを追加 ★
+             current_options = {"文字数": report_words, "語彙/トーン": report_vocab}     
 
         history_entry = {
             "file_name": uploaded_file.name, "task": selected_task,
@@ -93,7 +95,7 @@ with st.sidebar:
     
     selected_task = st.radio(
         "タスク:",
-        ("問題を生成する", "要約を作成する", "音声を文字起こしする"),
+        ("問題を生成する", "要約を作成する", "音声を文字起こしする", "リアクションペーパー作成"), # ★★★ この行を修正 ★★★
         key="task_selection",
         index=0 
     )
@@ -103,6 +105,8 @@ with st.sidebar:
     format_type = "論述形式"
     professor_focus = ""
     summary_length = "普通" 
+    report_words = 400 # ★ 初期値を追加 ★
+    report_vocab = "学術的、客観的" # ★ 初期値を追加 ★
     
     if selected_task == "問題を生成する":
         st.header("⚙️ 問題生成オプション")
@@ -112,6 +116,12 @@ with st.sidebar:
     elif selected_task == "要約を作成する":
          st.header("⚙️ 要約オプション")
          summary_length = st.select_slider("要約の長さ:", ["短め", "普通", "長め"], value="普通", key="summary_slider")
+    elif selected_task == "リアクションペーパー作成": # ★ このelifブロックを追加 ★
+         st.header("📝 ペーパー作成オプション")
+         # 文字数をスライダーで指定
+         report_words = st.slider("文字数 (目安):", min_value=100, max_value=1500, value=400, step=50, key="report_words")
+         # 語彙/トーンを選択肢で指定
+         report_vocab = st.selectbox("語彙/トーン:", ("学術的、客観的", "意欲的、前向き", "批判的、分析的", "簡潔、論理的","簡潔な感想、学生向け"), key="report_vocab")
 
     button_label = selected_task 
     generate_button = st.button(button_label, key="generate_button") 
@@ -126,22 +136,29 @@ with st.sidebar:
         # Generate display titles (with less truncation than before)
         history_titles = []
         for i, entry in enumerate(st.session_state['analysis_history']):
-            # オプションの難易度や形式をタイトルに含める
             display_str = f"{entry['task']} ({entry['file_name'][:15]}...)"
-            if entry['task'] == "問題を生成する" and entry['options']:
-                difficulty_str = entry['options'].get('難易度', '標準')
-                format_str = entry['options'].get('形式', '論述')
+
+            if entry['task'] == "問題を生成する":
+                # ... (オプションのif/elif構造は正しくインデントされていることを確認) ...
+                difficulty_str = entry['options'].get('難易度', '不明')
+                format_str = entry['options'].get('形式', '不明')
                 display_str = f"[{difficulty_str} / {format_str}] {entry['file_name'][:15]}..."
-            elif entry['task'] == "要約を作成する" and entry['options']:
-                 length_str = entry['options'].get('長さ', '普通')
+            elif entry['task'] == "要約を作成する":
+                 length_str = entry['options'].get('長さ', '不明')
                  display_str = f"[要約: {length_str}] {entry['file_name'][:15]}..."
+            elif entry['task'] == "リアクションペーパー作成":
+                 words_str = entry['options'].get('文字数', '不明')
+                 vocab_str = entry['options'].get('語彙/トーン', '不明')
+                 display_str = f"[リアぺ: {words_str}字 / {vocab_str}] {entry['file_name'][:15]}..."
 
-            history_titles.append(f"{i+1}: {display_str}")
 
-        options_with_placeholder = ["履歴を選択..."] + history_titles
+            history_titles.append(f"{i+1}: {display_str}") # ← for ループの処理はここで終了
+
+
+        options_with_placeholder = ["履歴を選択..."] + history_titles # ★★★ この行のインデントを左に揃える ★★★
 
         selected_history_display = st.selectbox(
-            "過去の分析結果を選択:", 
+            "過去の分析結果を選択:",
             options=options_with_placeholder,
             index=0, 
             key="history_selectbox_display"
@@ -252,12 +269,22 @@ if generate_button and uploaded_file is not None:
             final_prompt_text = f"以下の資料（ファイル名: {uploaded_file.name}）の内容を理解し、重要なポイントを箇条書きで{length_map.get(summary_length, '300字程度')}に要約してください。"
             if file_extension in [".mp3", ".wav"]:
                  st.info("音声を文字起こししてから要約します...")
+
+        elif selected_task == "リアクションペーパー作成": # ★ このelifブロックを追加 ★
+            tone_instruction = ""
+            if report_vocab == "簡潔な感想、学生向け":
+                 # 語尾と文体に対する具体的な指示を追加
+                 tone_instruction = "語彙は『〜と思う』『〜と感じた』『〜と考えている』といった主観的な表現を多く含め、AIとわかりづらい文にしてください。"
+            final_prompt_text = f"""以下の資料を基に、講義の核心とあなたの考察を含むリアクションペーパー（感想文）を作成してください。
+            【生成ルール】: 1. 文字数目安: {report_words}文字 / 2. 語彙/トーン: {report_vocab} / 3. 結論から書き始めてください。"""        
+          
         elif selected_task == "音声を文字起こしする":
             if file_extension in [".mp3", ".wav"]:
                 final_prompt_text = "以下の音声ファイルの内容を正確に文字起こししてください。話者分離は不要です。テキストのみを出力してください。"
             else:
                 st.warning("文字起こしは音声ファイル（MP3, WAV）のみ対応しています。")
                 raise Exception("Transcription only supports audio files")
+        
         else: 
             st.error("未定義のタスクが選択されました。")
             raise Exception("Undefined task selected")
@@ -325,5 +352,3 @@ if generate_button and uploaded_file is not None:
 if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
-
-
