@@ -1,45 +1,93 @@
 # app.py
 
-# 1. IMPORTS
+# --- 1. IMPORTS ---
 import streamlit as st
 import os
-import google.generativeai as genai # 公式推奨のインポート
+import google.generativeai as genai # 公式推奨
 import io 
-from pathlib import Path # ファイルパス操作用
-import time
+from pathlib import Path 
+import time 
 
 # LangChain and PDF processing imports (PDF処理にのみ使用)
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 
-# 2. THEME CONFIG
-# NOTE: This must be at the very top of the script execution
+# --- 2. THEME CONFIG ---
 st.set_page_config(
     page_title="Study-Mixer",
     page_icon="📚", 
     layout="wide"
 )
 
-# 3. SESSION STATE INITIALIZATION
+# --- 3. SESSION STATE INITIALIZATION ---
 if 'generated_content' not in st.session_state:
     st.session_state['generated_content'] = ""
+if 'analysis_history' not in st.session_state:
+    st.session_state['analysis_history'] = [] 
+if 'displayed_history_index' not in st.session_state:
+    st.session_state.displayed_history_index = None
+if 'last_generated_ref' not in st.session_state: 
+    st.session_state.last_generated_ref = None
+if 'just_saved_history' not in st.session_state:
+    st.session_state.just_saved_history = False
 
-# 4. APP SETUP
+# --- FUNCTION: HISTORY CALLBACK (ファイルの先頭に定義) ---
+def save_history_entry(generated_text, ai_success, selected_task, difficulty, format_type, professor_focus, summary_length, uploaded_file):
+    """AI処理が成功した場合にのみ履歴を保存する関数"""
+    
+    if not ai_success:
+        st.sidebar.warning("AI処理が成功しなかったため、履歴は保存されませんでした。", icon="⚠️")
+        return 
+
+    try:
+        current_options = {}
+        if selected_task == "問題を生成する":
+             current_options = {"難易度": difficulty, "形式": format_type, "焦点": professor_focus}
+        elif selected_task == "要約を作成する":
+             current_options = {"長さ": summary_length}
+
+        history_entry = {
+            "file_name": uploaded_file.name, "task": selected_task,
+            "options": current_options, "result": generated_text
+        }
+
+        # 厳密な重複チェック (最新のエントリと比較)
+        is_duplicate = False
+        if st.session_state['analysis_history']:
+            last_entry = st.session_state['analysis_history'][0]
+            if (last_entry['file_name'] == history_entry['file_name'] and
+                last_entry['task'] == history_entry['task'] and
+                len(last_entry['result']) == len(history_entry['result'])):
+                is_duplicate = True
+
+        if not is_duplicate:
+            st.session_state['analysis_history'].insert(0, history_entry)
+            st.session_state.just_saved_history = True # 成功フラグを立てる
+
+            # 履歴の最大件数を制限
+            MAX_HISTORY = 10
+            if len(st.session_state['analysis_history']) > MAX_HISTORY:
+                st.session_state['analysis_history'] = st.session_state['analysis_history'][:MAX_HISTORY]
+        
+    except Exception as hist_e:
+         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
+
+# --- 4. APP SETUP ---
 st.title("💡 Study-Mixer - 資料形式を選ばないAI学習支援")
 st.markdown("---")
 
-# 5. API KEY CONFIGURATION (公式推奨の方法)
+# --- 5. API KEY CONFIGURATION ---
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=API_KEY)
-except KeyError: # More specific error handling
+except KeyError: 
     st.error("エラー: .streamlit/secrets.toml に GEMINI_API_KEY が設定されていません。")
     st.stop()
 except Exception as e:
     st.error(f"APIキーの設定中に予期せぬエラーが発生しました: {e}")
     st.stop()
 
-# 6. UI CONTROLS (Sidebar)
+# --- 6. UI CONTROLS (Sidebar) ---
 with st.sidebar:
     st.header("⚙️ 実行したいタスクを選択")
     
@@ -50,180 +98,205 @@ with st.sidebar:
         index=0 
     )
 
-    # 問題生成オプションのデフォルト値を設定
+    # Initialize options outside the conditional block
     difficulty = "標準"
     format_type = "論述形式"
     professor_focus = ""
+    summary_length = "普通" 
     
     if selected_task == "問題を生成する":
         st.header("⚙️ 問題生成オプション")
-        difficulty = st.selectbox("難易度を選択:", ("標準", "難しい (応用・論述)", "易しい (基本・用語)"))
-        format_type = st.selectbox("問題の形式を選択:", ("論述形式", "一問一答形式", "選択式（4択）"))
-        professor_focus = st.text_area("先生が特に強調していた点を入力（任意）:", "（例：過去の社会問題との関連性を問う）", height=100)
-    
+        difficulty = st.selectbox("難易度を選択:", ("標準", "難しい (応用・論述)", "易しい (基本・用語)"), key="difficulty_select")
+        format_type = st.selectbox("問題の形式を選択:", ("論述形式", "一問一答形式", "選択式（4択）"), key="format_select")
+        professor_focus = st.text_area("先生が特に強調していた点を入力（任意）:", "（例：過去の社会問題との関連性を問う）", height=100, key="focus_input")
+    elif selected_task == "要約を作成する":
+         st.header("⚙️ 要約オプション")
+         summary_length = st.select_slider("要約の長さ:", ["短め", "普通", "長め"], value="普通", key="summary_slider")
+
     button_label = selected_task 
-    generate_button = st.button(button_label) 
+    generate_button = st.button(button_label, key="generate_button") 
 
+    # History Selection (Display in Sidebar)
+    st.markdown("---")
+    st.header("📄 分析履歴")
 
-# 7. FILE UPLOADER
+    if not st.session_state['analysis_history']:
+        st.caption("まだ履歴はありません。")
+    else:
+        history_titles = [f"{i+1}: {entry['task']} ({entry['file_name'][:20]})" 
+                          for i, entry in enumerate(st.session_state['analysis_history'])]
+        options_with_placeholder = ["履歴を選択..."] + history_titles
+
+        selected_history_display = st.selectbox(
+            "過去の分析結果を選択:", 
+            options=options_with_placeholder,
+            index=0, 
+            key="history_selectbox_display"
+        )
+
+        if selected_history_display != "履歴を選択...":
+            try:
+                selected_index = history_titles.index(selected_history_display)
+                selected_entry = st.session_state['analysis_history'][selected_index]
+
+                if st.session_state.get('displayed_history_index') != selected_index:
+                    st.session_state['generated_content'] = selected_entry['result']
+                    st.session_state.displayed_history_index = selected_index
+                    # st.rerun()は不要です
+
+            except (ValueError, IndexError):
+                 st.sidebar.warning("履歴の表示中にエラーが発生しました。")
+
+# --- 7. FILE UPLOADER ---
+def reset_history_selection_on_upload():
+    st.session_state.displayed_history_index = None
+
 uploaded_file = st.file_uploader(
     "講義のシラバス、板書、資料（PDF/画像/音声）をアップロード",
-    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav"] 
+    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav"],
+    key="file_uploader",
+    on_change=reset_history_selection_on_upload
 )
 
-# 8. AI PROCESSING LOGIC
-if uploaded_file is not None and generate_button:
-    
-    st.session_state['processing_done'] = False # 処理開始時にフラグをリセット
-    st.session_state['generated_content'] = "" # 前回の結果をクリア
+# --- 8. AI PROCESSING LOGIC ---
+if generate_button and uploaded_file is not None:
 
-    # --- プログレスバーの初期化 ---
+    # Reset states
+    st.session_state.just_saved_history = False # Reset flag for display
+    st.session_state['generated_content'] = "" 
+    st.session_state.displayed_history_index = None 
+
     progress_bar = st.progress(0, text="処理を開始します...")
-    # ---------------------------
 
-    try:
+    # Initialize variables used across try/except/cleanup
+    generated_text = "" 
+    ai_success = False
+    gemini_uploaded_file = None
+    temp_file_path = "" 
+
+    try: # Outer try for all processing steps
         file_extension = Path(uploaded_file.name).suffix.lower() 
         contents_for_model = [] 
-        gemini_uploaded_file = None 
         temp_file_path = f"temp_file{file_extension}" 
 
-        # 1. Save uploaded file temporarily
         progress_bar.progress(10, text="ファイルを一時保存中...")
         with open(temp_file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-        # 2. Upload file to Gemini (using genai.upload_file)
         progress_bar.progress(30, text=f"{file_extension.upper()} ファイルをGeminiにアップロード中...")
-        gemini_uploaded_file = genai.upload_file(path=temp_file_path)
+        gemini_uploaded_file = genai.upload_file(path=temp_file_path, display_name=uploaded_file.name)
         progress_bar.progress(50, text="アップロード完了。解析準備中...") 
 
-        # 3. Prepare content list based on file type
+        # 3. Prepare content list (File Handling)
         if file_extension == ".pdf":
             progress_bar.progress(60, text="PDFテキストを抽出・分割中...")
             try:
                 loader = PyPDFLoader(temp_file_path)
                 documents = loader.load()
-                text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0) 
+                text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100) 
                 texts = text_splitter.split_documents(documents)
+                if not texts: 
+                     raise ValueError("PDFからテキストを抽出できませんでした。")
                 context_text = "\n\n".join([t.page_content for t in texts])
                 contents_for_model.append(context_text)
                 contents_for_model.append(gemini_uploaded_file) 
                 progress_bar.progress(70, text="PDF解析完了。AIに指示を出します...") 
             except Exception as pdf_error:
-                st.error(f"PDF解析エラー: {pdf_error}")
-                st.stop()
+                raise Exception(f"PDF解析エラー: {pdf_error}") 
 
         elif file_extension in [".jpg", ".jpeg", ".png"]:
             progress_bar.progress(70, text="画像解析準備完了。AIに指示を出します...") 
-            contents_for_model.append(gemini_uploaded_file) # 画像の場合はファイル参照のみでOK
+            contents_for_model.append(gemini_uploaded_file) 
 
         elif file_extension in [".mp3", ".wav"]:
             progress_bar.progress(70, text="音声解析準備完了。AIに指示を出します...") 
-            contents_for_model.append(gemini_uploaded_file) # 音声の場合もファイル参照のみでOK
+            contents_for_model.append(gemini_uploaded_file) 
             
-        else:
+        else: 
             st.warning("サポートされていないファイル形式です。")
-            st.stop()
+            raise Exception("Unsupported file format") 
 
-        # --- Final Prompt Construction based on selected_task - Step 2の修正を適用 ---
-        
+        # --- Final Prompt Construction ---
         final_prompt_text = "" 
-        model_name = 'models/gemini-1.5-flash' # デフォルトモデル
         
         if selected_task == "問題を生成する":
-            final_prompt_text = f"""
-            あなたは**{Path(uploaded_file.name).stem}**の専門家です。
-            【生成ルール】: 難易度: {difficulty} / 形式: {format_type} / 焦点: {professor_focus}
-            このルールに従い、問題と模範解答を計5問作成してください。
-            """
+            final_prompt_text = f"あなたは**{Path(uploaded_file.name).stem}**の専門家です。\n【生成ルール】: 難易度: {difficulty} / 形式: {format_type} / 焦点: {professor_focus}\nこのルールに従い、問題と模範解答を計5問作成してください。"
         elif selected_task == "要約を作成する":
-            final_prompt_text = f"""
-            以下の資料（ファイル名: {uploaded_file.name}）の内容を理解し、重要なポイントを箇条書きで300字程度に要約してください。
-            """
+            length_map = {"短め": "150字程度", "普通": "300字程度", "長め": "500字程度"}
+            final_prompt_text = f"以下の資料（ファイル名: {uploaded_file.name}）の内容を理解し、重要なポイントを箇条書きで{length_map.get(summary_length, '300字程度')}に要約してください。"
             if file_extension in [".mp3", ".wav"]:
                  st.info("音声を文字起こししてから要約します...")
-                 # Gemini 1.5 Flashは音声入力から直接要約可能なので、特別な指示は不要な場合が多い
-
         elif selected_task == "音声を文字起こしする":
             if file_extension in [".mp3", ".wav"]:
-                final_prompt_text = f"""
-                以下の音声ファイルの内容を正確に文字起こししてください。話者分離は不要です。テキストのみを出力してください。
-                """
-                # model_name = 'models/gemini-1.5-flash' # Flashでも可能
+                final_prompt_text = "以下の音声ファイルの内容を正確に文字起こししてください。話者分離は不要です。テキストのみを出力してください。"
             else:
                 st.warning("文字起こしは音声ファイル（MP3, WAV）のみ対応しています。")
-                if gemini_uploaded_file: 
-                    try: genai.delete_file(gemini_uploaded_file.name) 
-                    except Exception: pass
-                if os.path.exists(temp_file_path): os.remove(temp_file_path)
-                st.stop()
-                
-        else:
+                raise Exception("Transcription only supports audio files")
+        else: 
             st.error("未定義のタスクが選択されました。")
-            st.stop()
-        # ------------------------------------
+            raise Exception("Undefined task selected")
             
-        # 最終指示をリストの先頭に追加
         contents_for_model.insert(0, final_prompt_text)
 
-        # Initialize the generative model
-        model = genai.GenerativeModel('models/gemini-2.5-flash-preview-09-2025') 
-
-        # Generate content request
+        # --- AI Request ---
+        model = genai.GenerativeModel('models/gemini-2.5-flash') 
         progress_bar.progress(80, text="AIが処理中です... (時間がかかる場合があります)") 
-        try:
-            response = model.generate_content(contents_for_model)
-            if response.parts:
-                 st.session_state['generated_content'] = response.text
+
+        try: # Inner try for AI request
+            response = model.generate_content(contents_for_model, request_options={"timeout": 600}) 
+
+            if hasattr(response, 'text') and response.text:
+                 generated_text = response.text 
+                 ai_success = True 
                  progress_bar.progress(95, text="AIによる処理完了！") 
-            else:
-                 feedback_reason = "不明な理由"
-                 try:
-                     if response.prompt_feedback and response.prompt_feedback.block_reason:
-                         feedback_reason = response.prompt_feedback.block_reason_message or str(response.prompt_feedback.block_reason)
-                 except Exception:
-                     pass 
-                 st.error(f"AIが応答を生成できませんでした。理由: {feedback_reason}")
-                 st.session_state['generated_content'] = f"エラー: AI応答の取得に失敗しました ({feedback_reason})"
-                 progress_bar.empty() # エラー時はバーを消す
-                 st.stop()
+            elif hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 feedback_reason = response.prompt_feedback.block_reason_message or str(response.prompt_feedback.block_reason)
+                 error_message = f"AIが応答を生成できませんでした。理由: {feedback_reason}"
+                 st.error(error_message)
+                 generated_text = error_message 
+            else: 
+                 error_message = "AIからの応答が空か、予期せぬ形式でした。"
+                 st.error(error_message)
+                 generated_text = error_message
 
-        except Exception as e:
-            st.error(f"AI生成エラーが発生しました: {e}")
-            st.session_state['generated_content'] = f"エラー: {e}" 
-            progress_bar.empty()
-            st.stop()
+        except Exception as ai_e: # Catch AI specific errors
+            error_message = f"AI生成エラーが発生しました: {ai_e}"
+            st.error(error_message)
+            generated_text = error_message 
 
+    # --- Catch All Processing Errors (Outer Except Block) ---
     except Exception as e:
-        st.error(f"ファイル処理またはアップロードエラー: {e}")
-        progress_bar.empty() # エラー時はバーを消す
-        if 'temp_file_path' in locals() and os.path.exists(temp_file_path): os.remove(temp_file_path) # Ensure cleanup on error
-        st.stop() 
+        error_message = f"処理中にエラーが発生しました: {e}"
+        st.error(error_message)
+        generated_text = error_message # Ensure generated_text exists
 
-    finally: 
-         # --- Cleanup ---
-         # Cleanup happens regardless of success or failure in try block if file was uploaded
-         if gemini_uploaded_file:
-             try:
-                 genai.delete_file(gemini_uploaded_file.name) 
-             except Exception as cleanup_error:
-                 st.warning(f"Geminiファイル削除中にエラー: {cleanup_error}") 
-         
-         if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
-             os.remove(temp_file_path) 
-         
-         # Update progress bar only if no critical error stopped execution earlier
-         if 'st' in locals() and hasattr(st, 'session_state') and st.session_state.get('generated_content', "") and not st.session_state['generated_content'].startswith("エラー:"):
-              progress_bar.progress(100, text="処理完了！") 
-              time.sleep(1) # Show complete message briefly
-              progress_bar.empty() # Clear the progress bar
-         elif 'progress_bar' in locals():
-              progress_bar.empty() # Clear progress bar on error too
-         
-         st.session_state['processing_done'] = True # Always mark as done in finally
+    # --- Save Result to Session State (Always happens) ---
+    st.session_state['generated_content'] = generated_text
+
+    # --- 履歴保存処理の呼び出し (重複防止のため) ---
+    # save_history_entry関数がファイル上部に定義されている前提
+    save_history_entry(generated_text, ai_success, selected_task, difficulty, format_type, professor_focus, summary_length, uploaded_file)
+    # -----------------------------------------
+
+    # --- Final Cleanup Block ---
+    # This block executes sequentially after history saving
+
+    # --- Cleanup ---
+    if gemini_uploaded_file:
+        try: genai.delete_file(gemini_uploaded_file.name)
+        except Exception as cleanup_error: st.warning(f"Geminiファイル削除中にエラー: {cleanup_error}")
+    if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+    # --- Progress Bar Update ---
+    if ai_success:
+            progress_bar.progress(100, text="処理完了！")
+            time.sleep(1)
+    if 'progress_bar' in locals(): progress_bar.empty()
 
 
-# 9. DISPLAY AI GENERATED RESULT
+# --- 9. DISPLAY AI GENERATED RESULT ---
 if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
+
