@@ -75,7 +75,7 @@ def save_history_entry(generated_text, ai_success, selected_task, difficulty, fo
          st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
 
 # --- 4. APP SETUP ---
-st.title("💡 Study-Mixer - その講義資料、10秒で試験問題に。")
+st.title("💡 Study-Mixer - その資料、10秒で試験問題に。")
 st.markdown("---")
 
 # --- 5. API KEY CONFIGURATION ---
