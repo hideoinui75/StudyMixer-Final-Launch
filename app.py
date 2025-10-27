@@ -46,7 +46,7 @@ def save_history_entry(generated_text, ai_success, selected_task, difficulty, fo
         elif selected_task == "要約を作成する":
              current_options = {"長さ": summary_length}
         elif selected_task == "リアクションペーパー作成": # ★ このelifブロックを追加 ★
-             current_options = {"文字数": report_words, "語彙/トーン": report_vocab}     
+             current_options = {"文字数": report_words, "語彙/トーン": report_vocab, "強調キーワード": report_keywords}     
 
         history_entry = {
             "file_name": uploaded_file.name, "task": selected_task,
@@ -122,6 +122,7 @@ with st.sidebar:
          report_words = st.slider("文字数 (目安):", min_value=100, max_value=1500, value=400, step=50, key="report_words")
          # 語彙/トーンを選択肢で指定
          report_vocab = st.selectbox("語彙/トーン:", ("学術的、客観的", "意欲的、前向き", "批判的、分析的", "簡潔、論理的","簡潔な感想、学生向け"), key="report_vocab")
+         report_keywords = st.text_input("強調したいキーワード (複数可):", placeholder="例: Web3, 分散型社会, 倫理", key="report_keywords")
 
     button_label = selected_task 
     generate_button = st.button(button_label, key="generate_button") 
@@ -275,6 +276,10 @@ if generate_button and uploaded_file is not None:
             if report_vocab == "簡潔な感想、学生向け":
                  # 語尾と文体に対する具体的な指示を追加
                  tone_instruction = "語彙は『〜と思う』『〜と感じた』『〜と考えている』といった主観的な表現を多く含め、AIとわかりづらい文にしてください。"
+                 keyword_instruction = ""
+            if report_keywords:
+                 keyword_instruction = f"キーワード「{report_keywords}」を**必ず**文中に何度も使用し、あなたの考察の中心に据えてください。"
+            
             final_prompt_text = f"""以下の資料を基に、講義の核心とあなたの考察を含むリアクションペーパー（感想文）を作成してください。
             【生成ルール】: 1. 文字数目安: {report_words}文字 / 2. 語彙/トーン: {report_vocab} / 3. 結論から書き始めてください。"""        
           
@@ -352,3 +357,5 @@ if generate_button and uploaded_file is not None:
 if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
+
+
