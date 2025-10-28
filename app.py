@@ -7,7 +7,6 @@ import google.generativeai as genai
 import io 
 from pathlib import Path 
 import time 
-# import json # 永続化機能削除のためコメントアウト
 
 # LangChain and PDF processing imports (PDF処理にのみ使用)
 from langchain_community.document_loaders import PyPDFLoader
@@ -19,6 +18,8 @@ st.set_page_config(
     page_icon="📚", 
     layout="wide"
 )
+
+# ★ サイドバーのデフォルト幅を広げるCSS ★
 st.markdown(
 """
 <style>
@@ -30,12 +31,9 @@ width: 350px !important; /* ここで幅を指定 (例: 350px) */
 unsafe_allow_html=True,
 )
 
-# --- 3. PERSISTENCE FUNCTIONS (削除) ---
-# load_data, save_data 関数を削除
 
-
-# --- 4. HISTORY SAVE FUNCTION ---
-# 履歴保存関数 (引数 file_name_str を受け取るように変更)
+# --- 3. HISTORY SAVE FUNCTION ---
+# 履歴保存関数 (JSON永続化は削除)
 def save_history_entry(generated_text, ai_success, selected_task, difficulty, format_type, professor_focus, summary_length, file_name_str, selected_course, report_words=None, report_vocab=None, report_keywords=None):
     """AI処理が成功した場合にのみ履歴を保存する関数"""
     
@@ -79,12 +77,12 @@ def save_history_entry(generated_text, ai_success, selected_task, difficulty, fo
             if len(st.session_state['analysis_history']) > MAX_HISTORY:
                 st.session_state['analysis_history'] = st.session_state['analysis_history'][:MAX_HISTORY]
             
-            # save_data() 呼び出し削除 (永続化機能削除)
+            # save_data() 呼び出し削除
             
     except Exception as hist_e:
          st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
 
-# --- 5. SESSION STATE INITIALIZATION ---
+# --- 4. SESSION STATE INITIALIZATION ---
 # 永続化（load_data）を削除し、空のリストまたはデフォルト値で初期化
 if 'generated_content' not in st.session_state:
     st.session_state['generated_content'] = ""
@@ -96,6 +94,10 @@ if 'last_generated_ref' not in st.session_state:
     st.session_state.last_generated_ref = None
 if 'just_saved_history' not in st.session_state:
     st.session_state.just_saved_history = False
+if 'chat_history' not in st.session_state: # ★★★ チャット履歴を追加 ★★★
+    st.session_state.chat_history = []
+if 'chat_context_title' not in st.session_state: # ★★★ コンテキストタイトルを追加 ★★★
+    st.session_state.chat_context_title = "（資料未選択)"
 
 # ★ 講義フォルダ機能 (永続化なし) ★
 if 'course_folders' not in st.session_state:
@@ -107,11 +109,11 @@ if 'selected_course' not in st.session_state:
 if 'uploaded_file_list' not in st.session_state:
     st.session_state.uploaded_file_list = []
 
-# --- 6. APP SETUP ---
-st.title("💡 Study-Mixer - その資料、10秒で試験問題に。")
+# --- 5. APP SETUP ---
+st.title("💡 Study-Mixer - リアぺも問題も５秒で生成。")
 st.markdown("---")
 
-# --- 7. API KEY CONFIGURATION ---
+# --- 6. API KEY CONFIGURATION ---
 try:
     API_KEY = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=API_KEY)
@@ -122,67 +124,8 @@ except Exception as e:
     st.error(f"APIキーの設定中に予期せぬエラーが発生しました: {e}")
     st.stop()
 
-# --- 8. UI CONTROLS (Sidebar) ---
+# --- 7. UI CONTROLS (Sidebar) ---
 with st.sidebar:
-    # --- 講義フォルダ管理 ---
-    st.header("📚 講義フォルダ管理")
-    new_course_name = st.text_input("新しい講義名を追加:", placeholder="例: 経済学特講", key="new_course_input")
-    
-    if st.button("講義フォルダを追加"):
-        if new_course_name and new_course_name not in st.session_state.course_folders:
-            st.session_state.course_folders.append(new_course_name)
-            st.session_state.selected_course = new_course_name # 追加したものを選択
-            # save_data() 呼び出し削除
-            st.rerun() # UI更新のためリラン
-    
-    st.markdown("---") # 区切り線
-    
-    # 「未分類」以外のフォルダを削除対象リストとして取得
-    deletable_folders = [folder for folder in st.session_state.course_folders if folder != "未分類"]
-    
-    if deletable_folders: # 削除できるフォルダが1つ以上ある場合のみ表示
-        st.subheader("🗑️ フォルダを削除")
-        
-        folder_to_delete = st.selectbox(
-            "削除するフォルダを選択:",
-            options=deletable_folders,
-            index=0,
-            key="delete_folder_select"
-        )
-        
-        # 削除ボタン
-        if st.button(f"「{folder_to_delete}」を削除", key="delete_folder_button", type="primary"):
-            
-            # 1. フォルダリストから削除
-            st.session_state.course_folders.remove(folder_to_delete)
-            
-            # 2. 関連する履歴を「未分類」に移動
-            for entry in st.session_state['analysis_history']:
-                if entry.get('course') == folder_to_delete:
-                    entry['course'] = "未分類"
-            
-            # 3. 現在選択中のフォルダを「未分類」に戻す
-            st.session_state.selected_course = "未分類"
-            
-            st.success(f"フォルダ「{folder_to_delete}」を削除しました。中の履歴は「未分類」に移動しました。")
-            st.rerun() # UIを更新
-
-    
-    # 選択中のフォルダがリストに存在するか確認
-    current_folder_index = 0
-    if st.session_state.selected_course in st.session_state.course_folders:
-        current_folder_index = st.session_state.course_folders.index(st.session_state.selected_course)
-    elif st.session_state.course_folders:
-        st.session_state.selected_course = st.session_state.course_folders[0] # 存在しない場合は先頭を選択
-    
-    st.session_state.selected_course = st.selectbox(
-        "分析結果を保存する講義フォルダ:",
-        st.session_state.course_folders,
-        index=current_folder_index,
-        key="course_folder_select"
-    )
-    st.markdown("---")
-    
     # --- タスク選択 ---
     st.header("⚙️ 実行したいタスクを選択")
     
@@ -217,8 +160,60 @@ with st.sidebar:
           report_vocab = st.selectbox("語彙/トーン:", ("学術的、客観的", "意欲的、前向き", "批判的、分析的", "簡潔、論理的","簡潔な感想、学生向け"), key="report_vocab")
           report_keywords = st.text_input("強調したいキーワード (複数可):", placeholder="例: Web3, 分散型社会, 倫理", key="report_keywords")
 
+    # --- 生成ボタン ---
     button_label = f"{selected_task} ( {len(st.session_state.uploaded_file_list)}件の資料 )"
     generate_button = st.button(button_label, key="generate_button", use_container_width=True) 
+
+    # --- 講義フォルダ管理 ---
+    st.header("📚 講義フォルダ管理")
+    new_course_name = st.text_input("新しい講義名を追加:", placeholder="例: 経済学特講", key="new_course_input")
+    
+    if st.button("講義フォルダを追加"):
+        if new_course_name and new_course_name not in st.session_state.course_folders:
+            st.session_state.course_folders.append(new_course_name)
+            st.session_state.selected_course = new_course_name # 追加したものを選択
+            # save_data() 呼び出し削除
+            st.rerun() # UI更新のためリラン
+    
+    
+    st.subheader("講義フォルダ")
+
+    # ★ フォルダリストをボタンで描画 (選択と削除のUI) ★
+    folder_to_delete = None # 削除が押されたフォルダを一時的に保持
+    
+    for folder in st.session_state.course_folders:
+        cols = st.columns([5, 1]) # フォルダ名用の列 と 削除ボタン用の列
+        
+        # 現在選択中のフォルダかどうかでボタンのタイプを変える
+        is_selected = (folder == st.session_state.selected_course)
+        button_type = "primary" if is_selected else "secondary"
+        
+        # --- フォルダ選択ボタン ---
+        if cols[0].button(folder, key=f"select_{folder}", use_container_width=True, type=button_type):
+            st.session_state.selected_course = folder
+            st.rerun() # 選択をUIに反映
+
+        # --- 削除ボタン (「未分類」フォルダ以外に表示) ---
+        if folder != "未分類":
+            if cols[1].button("🗑️", key=f"delete_{folder}", help=f"「{folder}」を削除します"):
+                folder_to_delete = folder # 削除対象としてマーク
+
+    # ループの外で削除処理を実行
+    if folder_to_delete:
+        
+        st.session_state.course_folders.remove(folder_to_delete)
+        
+        for entry in st.session_state['analysis_history']:
+            if entry.get('course') == folder_to_delete:
+                entry['course'] = "未分類"
+        
+        if st.session_state.selected_course == folder_to_delete:
+            st.session_state.selected_course = "未分類"
+        
+        st.success(f"フォルダ「{folder_to_delete}」を削除しました。中の履歴は「未分類」に移動しました。")
+        st.rerun() # UIを更新
+
+    
 
     # --- 履歴表示 ---
     st.markdown("---") 
@@ -232,7 +227,6 @@ with st.sidebar:
     else:
         history_titles = []
         for i, entry in enumerate(filtered_history):
-            # ファイル名が長い場合も考慮
             display_str = f"[{entry['task']}] {entry['file_name'][:25]}..."
             history_titles.append(f"{i+1}: {display_str}")
 
@@ -244,7 +238,8 @@ with st.sidebar:
             index=0, 
             key="history_selectbox_display"
         )
-
+        
+        # ★ 履歴閲覧バグ修正 ★
         if selected_history_display != "履歴を選択..." and not generate_button:
             try:
                 selected_index = options_with_placeholder.index(selected_history_display) - 1
@@ -269,11 +264,11 @@ with st.sidebar:
             except (ValueError, IndexError):
                  st.sidebar.warning("履歴の表示中にエラーが発生しました。", icon="⚠️")
 
-# --- 9. FILE UPLOADER (複数ファイル蓄積方式) ---
+# --- 8. FILE UPLOADER (複数ファイル蓄積方式) ---
 def reset_history_selection_on_upload():
     st.session_state.displayed_history_index = None
 
-# ★★★ ここが「multiple=True」のエラー回避ロジック ★★★
+# ★「multiple=True」のエラー回避ロジック ★
 newly_uploaded_file = st.file_uploader(
     f"資料を1つずつアップロード (保存先: **{st.session_state.selected_course}**)",
     type=["pdf", "png", "jpg", "jpeg", "mp3", "wav"],
@@ -284,7 +279,6 @@ newly_uploaded_file = st.file_uploader(
 
 # アップロードされたファイルをリストに蓄積する
 if newly_uploaded_file is not None:
-    # ファイルがまだリストに追加されていないかチェック (名前とサイズで簡易的に)
     is_already_added = False
     for f in st.session_state.uploaded_file_list:
         if f.name == newly_uploaded_file.name and f.size == newly_uploaded_file.size:
@@ -293,14 +287,13 @@ if newly_uploaded_file is not None:
             
     if not is_already_added:
         st.session_state.uploaded_file_list.append(newly_uploaded_file)
-        # ファイルを追加したら、アップローダーをリセットするためにRerun
-        st.rerun()
+        st.rerun() # ファイル追加を即時反映
 
 # --- アップロード済みファイルリストの表示とクリアボタン ---
 if st.session_state.uploaded_file_list:
     st.subheader(f"📤 分析対象の資料リスト ({len(st.session_state.uploaded_file_list)}件)")
     
-    cols = st.columns([4, 1]) # ファイル名と削除ボタン用の列
+    cols = st.columns([4, 1])
     
     index_to_remove = None
     
@@ -311,16 +304,15 @@ if st.session_state.uploaded_file_list:
             
     if index_to_remove is not None:
         st.session_state.uploaded_file_list.pop(index_to_remove)
-        st.rerun() # リスト更新のためRerun
+        st.rerun() 
 
     if st.button("リストをすべてクリア", key="clear_all_uploads"):
         st.session_state.uploaded_file_list = []
-        st.rerun() # リスト更新のためRerun
+        st.rerun()
         
 st.markdown("---")
 
-# --- 10. AI PROCESSING LOGIC ---
-# ★ 処理開始のトリガーをリストの存在確認に変更 ★
+# --- 9. AI PROCESSING LOGIC ---
 if generate_button and st.session_state.uploaded_file_list:
 
     # 処理対象のファイルリストを取得
@@ -340,9 +332,9 @@ if generate_button and st.session_state.uploaded_file_list:
     # Initialize variables
     generated_text = "" 
     ai_success = False
-    uploaded_gemini_files = [] # Gemini APIにアップロードされたファイルオブジェクト
-    temp_file_paths = []       # クリーンアップ用の一時ファイルパス
-    contents_for_model = []    # AIに渡す全コンテンツ (テキストとファイルオブジェクト)
+    uploaded_gemini_files = [] 
+    temp_file_paths = []       
+    contents_for_model = []    
 
     try: # Outer try for all processing steps
        total_files = len(uploaded_files)
@@ -353,7 +345,7 @@ if generate_button and st.session_state.uploaded_file_list:
             temp_file_path = f"temp_{i}_{uploaded_file.name}" 
             temp_file_paths.append(temp_file_path)
 
-            progress_percent = int((i / total_files) * 50) # 進捗
+            progress_percent = int((i / total_files) * 50) 
 
             progress_bar.progress(progress_percent + 10, text=f"[{i+1}/{total_files}] ファイルを一時保存中...")
             with open(temp_file_path, "wb") as f:
@@ -361,7 +353,7 @@ if generate_button and st.session_state.uploaded_file_list:
 
             progress_bar.progress(progress_percent + 30, text=f"[{i+1}/{total_files}] {file_extension.upper()} ファイルをGeminiにアップロード中...")
             gemini_uploaded_file = genai.upload_file(path=temp_file_path, display_name=uploaded_file.name)
-            uploaded_gemini_files.append(gemini_uploaded_file) # アップロード結果をリストに保持
+            uploaded_gemini_files.append(gemini_uploaded_file)
             
             progress_bar.progress(progress_percent + 50, text=f"[{i+1}/{total_files}] アップロード完了。解析準備中...") 
 
@@ -399,10 +391,9 @@ if generate_button and st.session_state.uploaded_file_list:
        # --- Final Prompt Construction ---
        final_prompt_text = "" 
        
-       # ★ file_names_str の定義を try の外に移動したため、ここでは削除 ★
-       
        if selected_task == "問題を生成する":
             final_prompt_text = f"あなたは**以下の資料群**の専門家です。\n資料群: {file_names_str}\n【生成ルール】: 難易度: {difficulty} / 形式: {format_type} / 焦点: {professor_focus}\nこれらすべての資料の内容を統合し、このルールに従って問題と模範解答を計5問作成してください。"
+       
        elif selected_task == "要約を作成する":
             length_map = {"短め": "150字程度", "普通": "300字程度", "長め": "500字程度"}
             final_prompt_text = f"以下の資料群（ファイル名: {file_names_str}）の内容を理解し、重要なポイントを箇条書きで要約してください。要約の長さは**厳密に{length_map.get(summary_length, '300字程度')}**にしてください。**必ず文章の最後まで完全な形で**出力してください。"
@@ -413,7 +404,7 @@ if generate_button and st.session_state.uploaded_file_list:
             tone_instruction = ""
             keyword_instruction = ""
             if report_vocab == "簡潔な感想、学生向け":
-                tone_instruction = "語彙は『〜と思う』『〜と感じた』『〜と考えている』といった主観的な表現を多く含め、AIとわかりづDらい文にしてください。"
+                tone_instruction = "語彙は『〜と思う』『〜と感じた』『〜と考えている』といった主観的な表現を多く含め、AIとわかりづらい文にしてください。"
             if report_keywords:
                 keyword_instruction = f"キーワード「{report_keywords}」を**必ず**文中に何度も使用し、あなたの考察の中心に据えてください。"
             
@@ -471,7 +462,6 @@ if generate_button and st.session_state.uploaded_file_list:
     st.session_state['generated_content'] = generated_text
 
     # --- 履歴保存処理の呼び出し ---
-    # 連結したファイル名を渡す (file_names_str は try の外で定義済み)
     save_history_entry(
         generated_text, 
         ai_success, 
@@ -493,29 +483,81 @@ if generate_button and st.session_state.uploaded_file_list:
     # 処理が完了したら、アップロードリストをクリアする
     st.session_state.uploaded_file_list = []
 
-    # Geminiにアップロードしたファイルを削除
     if uploaded_gemini_files:
         for f in uploaded_gemini_files:
             try: genai.delete_file(f.name)
             except Exception as cleanup_error: st.warning(f"Geminiファイル削除中にエラー: {cleanup_error}", icon="⚠️")
     
-    # 一時ファイルを削除
     if temp_file_paths:
         for p in temp_file_paths:
             if os.path.exists(p):
                 os.remove(p)
 
-    # --- Progress Bar Update ---
     if ai_success:
         progress_bar.progress(100, text="処理完了！")
     else:
         progress_bar.empty()
     
-    # 処理完了後、UI（特にファイルリスト）を更新するためにRerun
     st.rerun()
 
 
-# --- 11. DISPLAY AI GENERATED RESULT ---
+# --- 10. DISPLAY AI GENERATED RESULT ---
 if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
+
+# --- 8.5 CHAT INTERFACE (Main Area) --- # ★★★ このセクションを新規挿入 ★★★
+st.markdown("---")
+st.subheader("💬 資料深掘りチャット") # ★ st.header から st.subheader に変更 ★
+st.caption(f"コンテキスト: {st.session_state.chat_context_title}")
+
+if not st.session_state.get('chat_history'):
+    st.caption("サイドバーの履歴を選択するか、AI分析を実行するとチャットを開始できます。")
+    if st.session_state.get('generated_content'):
+         st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": "分析完了！この資料について何か質問はありますか？"}]})
+         st.session_state.chat_context_title = "最新の分析結果"
+    elif not st.session_state['analysis_history']:
+         st.stop() 
+
+# 過去のチャット履歴を表示
+for message in st.session_state.chat_history:
+    with st.chat_message(message["role"]):
+        st.markdown(message["parts"][0]["text"])
+
+# ユーザー入力
+user_query = st.chat_input("この資料について質問を入力...")
+
+if user_query:
+    
+    # ユーザーの質問を履歴に追加
+    st.session_state.chat_history.append({"role": "user", "parts": [{"text": user_query}]})
+    
+    # コンテキストとしてメイン表示エリアの最新の結果を取得
+    current_main_result = st.session_state.get('generated_content', '（有効な資料なし）')
+    
+    # チャットのプロンプトにコンテキストを組み込む
+    chat_prompt = f"以下のコンテキストを基に、ユーザーの質問に答えてください。コンテキストの内容以外は回答しないでください。\n\n[コンテキスト]: {current_main_result}\n\nユーザーの質問: {user_query}"
+    
+    # モデルの呼び出し
+    try:
+        chat_model = genai.GenerativeModel('models/gemini-2.5-flash')
+        
+        # 過去の会話履歴を渡すために、contentsリストを構築
+        # (セッションステートにある履歴をそのまま使用)
+        
+        with st.spinner("AIが回答を作成中です..."):
+             response = chat_model.generate_content(
+                contents=st.session_state.chat_history 
+             )
+
+        ai_response_text = response.text
+        
+        # AIの回答を履歴に追加
+        st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": ai_response_text}]})
+
+    except Exception as e:
+        ai_response_text = f"チャットエラー: {e}"
+        st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": ai_response_text}]})
+        
+    # 画面を更新して最新のチャットを表示
+    st.rerun()
