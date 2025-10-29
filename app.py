@@ -12,6 +12,10 @@ import time
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+import json
+
 # --- 2. THEME CONFIG ---
 st.set_page_config(
     page_title="Study-Mixer",
@@ -31,50 +35,59 @@ width: 350px !important; /* ここで幅を指定 (例: 350px) */
 unsafe_allow_html=True,
 )
 
-
-# --- 3. HISTORY SAVE FUNCTION ---
 # --- FUNCTION: HISTORY CALLBACK (履歴保存関数) ---
-# 修正点: 引数を簡素化し、オプションを辞書(options)として受け取る
-def save_history_entry(generated_text, ai_success, selected_task, options, uploaded_file_names, lecture_name):
-    """AI処理が成功した場合にのみ履歴を保存する関数 (引数を簡素化)"""
+def save_history_entry(db, user_id, generated_text, ai_success, selected_task, options, uploaded_file_names, lecture_name):
+    """AI処理が成功した場合にのみ履歴を保存する関数 (DB対応・重複防止修正)"""
     
     if not ai_success:
         st.sidebar.warning("AI処理が成功しなかったため、履歴は保存されませんでした。", icon="⚠️")
         return 
 
     try:
-        # 2. 履歴エントリ作成
         file_list_str = ", ".join(uploaded_file_names)
         
-        history_entry = {
+        # 1. これから保存する履歴データを作成
+        history_entry_data = {
             "file_name": file_list_str, 
             "task": selected_task,
-            "options": options, # ★ 渡された辞書をそのまま保存
+            "options": options, 
             "result": generated_text,
             "lecture_name": lecture_name,
+            "timestamp": firestore.SERVER_TIMESTAMP 
         }
 
-        # 3. 重複チェック (厳密なチェック)
+        # 2. ★★★ 重複チェックを「先」に行う ★★★
         is_duplicate = False
-        if st.session_state['analysis_history']:
-            last_entry = st.session_state['analysis_history'][0]
-            if (last_entry['file_name'] == history_entry['file_name'] and
-                last_entry['task'] == history_entry['task'] and
-                len(last_entry['result']) == len(history_entry['result'])):
+        if st.session_state['analysis_history']: # 既に履歴がある場合
+            last_entry = st.session_state['analysis_history'][0] # メモリ上の最新履歴
+            
+            # タイムスタンプを除外して比較
+            if (last_entry.get('file_name') == history_entry_data.get('file_name') and
+                last_entry.get('task') == history_entry_data.get('task') and
+                last_entry.get('lecture_name') == history_entry_data.get('lecture_name') and
+                len(last_entry.get('result','')) == len(history_entry_data.get('result',''))):
+                
                 is_duplicate = True
+                st.sidebar.warning("重複した履歴のため保存をスキップしました。", icon="ℹ️")
 
-        # 4. 重複でなければ追加
+        # 3. ★★★ 重複でなければ「一度だけ」保存する ★★★
         if not is_duplicate:
-            st.session_state['analysis_history'].insert(0, history_entry)
-            st.session_state.just_saved_history = True # 成功フラグを立てる
+            # Firestore (DB) への保存
+            doc_ref = db.collection(f"users/{user_id}/analysis_history").document()
+            doc_ref.set(history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
+            st.sidebar.info("分析結果をデータベースに保存しました。", icon="💾")
 
-            # 5. 履歴の最大件数を制限
-            MAX_HISTORY = 10
+            # Session Stateへの保存 (即時反映のため)
+            st.session_state['analysis_history'].insert(0, history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
+            st.session_state.just_saved_history = True
+
+            # 4. 履歴の最大件数を制限
             if len(st.session_state['analysis_history']) > MAX_HISTORY:
                 st.session_state['analysis_history'] = st.session_state['analysis_history'][:MAX_HISTORY]
         
     except Exception as hist_e:
-         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
+         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}") # ここで NameError が捕捉されていました
+# --- END FUNCTION: HISTORY CALLBACK ---
 
 # --- 4. SESSION STATE INITIALIZATION ---
 # 永続化（load_data）を削除し、空のリストまたはデフォルト値で初期化
@@ -94,6 +107,8 @@ if 'chat_history' not in st.session_state: # ★★★ チャット履歴を追�
     ]
 if 'chat_context_title' not in st.session_state: # ★★★ コンテキストタイトルを追加 ★★★
     st.session_state.chat_context_title = "（資料未選択)"
+
+MAX_HISTORY = 10    
 
 # ★ 講義フォルダ機能 (永続化なし) ★
 if 'course_folders' not in st.session_state:
@@ -120,8 +135,80 @@ except Exception as e:
     st.error(f"APIキーの設定中に予期せぬエラーが発生しました: {e}")
     st.stop()
 
+# ★★★ Firebase (Login) Initialization ★★★
+# Run this only once, at the start of the app
+@st.cache_resource
+def init_firebase():
+    try:
+        # 1. st.secretsから「読み取り専用」のデータを取得
+        service_account_config = st.secrets["firebase_service_account"] 
+        
+        # 2. ★★★ 修正箇所：通常の辞書に「コピー」する ★★★
+        # (st.secretsオブジェクトは変更できないため、変更可能なコピーを作成)
+        mutable_service_account_dict = dict(service_account_config)
+        # --------------------------------------------------
+        
+        # 3. 「コピー」した辞書の内容を修正する
+        if "private_key" in mutable_service_account_dict and isinstance(mutable_service_account_dict["private_key"], str):
+             mutable_service_account_dict["private_key"] = mutable_service_account_dict["private_key"].replace("\\n", "\n")
+            
+        # 4. 「コピー」した（修正済みの）辞書を使って初期化
+        cred = credentials.Certificate(mutable_service_account_dict) 
+        
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        
+        return firestore.client()
+        
+    except KeyError:
+        st.error("エラー: FirebaseのサービスアカウントキーがSecretsに正しく設定されていません。(Hint: [firebase_service_account] セクションを確認してください)", icon="🔥")
+        st.stop()
+    except Exception as e:
+        st.error(f"Firebase初期化エラー: {e}", icon="🔥")
+        st.stop()
+
+# dbクライアントをグローバルに取得
+db = init_firebase()
+# ★★★ End Firebase Initialization ★★★
+# ★★★ End Firebase Initialization ★★★   
+
 # --- 7. UI CONTROLS (Sidebar) ---
 with st.sidebar:
+
+    # ★★★ ここからログインUIを挿入 ★★★
+    st.header("🔑 ログイン")
+    
+    # ユーザーIDがセッションステートに保存されていなければ、ログインUIを表示
+    if 'user_id' not in st.session_state:
+        st.caption("テスト用のユーザーIDを入力してください。")
+        # 以前のキー(login_input_main)と競合しないよう、新しいキー 'login_input_sidebar' を使用
+        test_user_id = st.text_input(
+            "ユーザーID (テスト用)", 
+            key="login_input_sidebar", 
+            placeholder="例: user_A"
+        )
+        
+        if st.button("ログイン", key="login_button_sidebar", use_container_width=True):
+            if test_user_id:
+                st.session_state['user_id'] = test_user_id
+                st.session_state['analysis_history'] = [] 
+                st.rerun() 
+            else:
+                st.warning("ユーザーIDを入力してください。")
+    
+    # ログイン中の場合
+    else:
+        user_id = st.session_state['user_id']
+        st.success(f"ログイン中: **{user_id}**", icon="✅")
+        
+        if st.button("ログアウト", key="logout_button_sidebar", use_container_width=True):
+            # セッションステートをクリア
+            for key in st.session_state.keys():
+                del st.session_state[key]
+            st.rerun() 
+            
+    st.markdown("---")
+    # ★★★ ログインUIここまで ★★★
     # --- タスク選択 ---
     st.header("⚙️ 実行したいタスクを選択")
     
@@ -217,118 +304,96 @@ with st.sidebar:
     
     # --- 履歴のフォルダビュー (講義別フィルター) ---
     st.header("📂 履歴リスト")
+
+    # 1. ログイン状態の確認
+    if 'user_id' not in st.session_state:
+        st.caption("ログインすると履歴が表示されます。")
     
-    # コールバック関数を定義 (フィルター設定用)
-    def set_filter(lecture_name):
-        """サイドバーボタンクリック時にフィルターを設定するコールバック関数"""
-        st.session_state['current_lecture_filter'] = lecture_name
-        st.rerun() 
-
-    # --- 講義名リストとフィルターボタンの表示 ---
-    if not st.session_state['analysis_history']:
-        st.caption("まだ履歴はありません。")
+    # ログインしている場合
     else:
-        # 1. すべての講義名を抽出
-        lecture_names = [entry.get('lecture_name', '（講義名なし）') for entry in st.session_state['analysis_history']]
-        unique_lectures = sorted(list(set(lecture_names)))
-
-        # 2. フィルタリング解除ボタン (すべての履歴)
-        is_all_active = st.session_state.get('current_lecture_filter') is None
-        st.button(
-            "📚 すべての履歴を表示",
-            on_click=set_filter,
-            args=(None,),
-            key="filter_all",
-            use_container_width=True,
-            type="primary" if is_all_active else "secondary"
-        )
-        
-        st.markdown("---")
-        st.caption("講義でフィルター:")
-
-        # 3. 講義ごとのフォルダボタン
-        for lecture in unique_lectures:
-            is_active = st.session_state.get('current_lecture_filter') == lecture
-            item_count = lecture_names.count(lecture)
+        # 2. ★★★ Firestore (DB) から履歴を読み込む ★★★
+        try:
+            user_id = st.session_state['user_id']
+            # .order_by("timestamp", DESCENDING) で新しい順に
+            # .limit(MAX_HISTORY) で最大件数を取得 (MAX_HISTORYはファイル上部で定義)
+            history_ref = db.collection(f"users/{user_id}/analysis_history").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(MAX_HISTORY)
             
-            # 講義名ボタン
-            st.button(
-                f"📁 {lecture} ({item_count})",
-                on_click=set_filter,
-                args=(lecture,),
-                key=f"filter_{lecture}",
-                use_container_width=True,
-                type="primary" if is_active else "secondary"
-            )
+            # 読み込んだ履歴を st.session_state に格納
+            st.session_state['analysis_history'] = [doc.to_dict() for doc in history_ref.stream()]
+            
+        except Exception as db_error:
+            st.error(f"履歴の読み込みに失敗しました: {db_error}", icon="🔥")
+            st.session_state['analysis_history'] = [] # エラー時は空にする
 
-        st.markdown("---") 
-        st.subheader("📝 フィルターされた結果")
-
-        # --- 4. フィルター処理 ---
-        current_filter = st.session_state.get('current_lecture_filter', None)
-        
-        if current_filter is None:
-            filtered_history = st.session_state['analysis_history']
-            st.caption("現在: **すべての履歴**を表示中")
+        # 3. 履歴が空かどうかの表示
+        if not st.session_state['analysis_history']:
+            st.caption("まだ履歴はありません。")
+            
+        # 4. ★★★ 読み込んだ履歴をグループ化して表示 ★★★
         else:
-            filtered_history = [
-                entry for entry in st.session_state['analysis_history'] 
-                if entry.get('lecture_name') == current_filter
-            ]
-            st.caption(f"現在: 講義『**{current_filter}**』の履歴を {len(filtered_history)}件 表示中")
+            history_by_course = {}
+            for entry in st.session_state['analysis_history']:
+                course_name = entry.get('lecture_name', '（無題の分析）') 
+                if course_name not in history_by_course:
+                    history_by_course[course_name] = []
+                history_by_course[course_name].append(entry)
+            
+            # コールバック関数 (ボタンクリック時に結果をロード)
+            def load_history_result(entry, index_key):
+                st.session_state['generated_content'] = entry['result']
+                st.session_state.displayed_history_index = index_key
+                
 
-
-        # --- 5. 履歴の選択ボックス ---
-        if not filtered_history:
-             st.info("この講義の履歴はありません。", icon="ℹ️")
-        else:
-            history_titles = []
-            for i, entry in enumerate(filtered_history):
-                 # 難易度や形式、ファイル名を結合して表示名を作成
-                display_str = f"[{entry['task']}] {entry['file_name'].split(',')[0][:15]}..." # 最初のファイル名で省略
-                if entry['task'] == "問題を生成する" and entry['options']:
-                    difficulty_str = entry['options'].get('難易度', '不明')
-                    format_str = entry['options'].get('形式', '不明')
-                    display_str = f"[問:{difficulty_str} / {format_str}] {entry['file_name'].split(',')[0][:10]}..."
-
-                history_titles.append(f"{i+1}: {display_str}")
-
-            options_with_placeholder = ["履歴を選択して表示..."] + history_titles
-
-            selected_history_display = st.selectbox(
-                "結果を選択:", 
-                options=options_with_placeholder,
-                index=0, 
-                key="history_selectbox_display"
-            )
-
-            # --- 6. 履歴選択時の表示ロジック ---
-            if selected_history_display != "履歴を選択して表示...":
-                try:
-                    # -1でインデックスを取得
-                    selected_index_in_list = options_with_placeholder.index(selected_history_display) - 1 
-                    selected_entry = filtered_history[selected_index_in_list]
+            # どのフォルダもデフォルトで開いておくか
+            default_expanded = len(history_by_course) < 3 
+            
+            for course_name, entries in history_by_course.items():
+                
+                with st.expander(f"📁 {course_name} ({len(entries)}件)", expanded=default_expanded):
                     
-                    # メインエリアに表示する
-                    st.session_state['generated_content'] = selected_entry['result']
+                    # フォルダ内の履歴をボタンとして表示 (時系列順)
+                    for i, entry in enumerate(entries):
+                        # ボタンの表示名を作成 (タスク + オプション)
+                        display_str = f"{entry['task']}"
+                        options = entry.get('options', {})
+                        if entry['task'] == "問題を生成する":
+                            difficulty_str = options.get('難易度', '?')
+                            format_str = options.get('形式', '?')
+                            display_str += f" [{format_str}, {difficulty_str}]"
+                        elif entry['task'] == "要約を作成する":
+                             length_str = options.get('長さ', '?')
+                             display_str += f" [長さ: {length_str}]"
+                        elif entry['task'] == "リアクションペーパー作成":
+                             vocab_str = options.get('語彙/トーン', '?')
+                             display_str += f" [トーン: {vocab_str}]"
 
-                    # --- サイドバーでの詳細表示 ---
-                    st.markdown("---")
-                    st.subheader(f"選択履歴 {selected_index_in_list + 1} の詳細:")
-                    st.caption(f"**タスク:** {selected_entry['task']}")
-                    st.caption(f"**ファイル:** {selected_entry['file_name']}")
-                    st.caption(f"**フォルダ:** {selected_entry.get('lecture_name', '未分類')}")
-                    
-                    if selected_entry['options']:
-                        st.markdown("**実行オプション:**")
-                        for k, v in selected_entry['options'].items():
-                             st.write(f"- **{k}**: {v}")
-                    
-                    # メイン画面を更新
-                    st.rerun() 
-
-                except (ValueError, IndexError):
-                     st.sidebar.error("履歴データの読み込み中にエラーが発生しました。", icon="🚨")
+                        # --- 2. ★★★ ツールチップ用の詳細テキストを作成 ★★★ ---
+                        tooltip_text = f"""
+                        タスク: {entry['task']}
+                        講義名: {entry.get('lecture_name', '未分類')}
+                        ファイル: {entry['file_name']}
+                        """
+                        if entry['options']:
+                            options_str = ", ".join([f"{k}: {v}" for k, v in entry['options'].items() if v])
+                            tooltip_text += f"オプション: {options_str}\n"
+                        
+            # --- ツールチップ作成ここまで ---
+                        # ファイル名の一部を追加
+                        file_name_short = entry['file_name'].split(',')[0][:15] + "..."
+                        
+                        # ボタンの一意なキーを作成
+                        button_key = f"history_{course_name}_{i}"
+                        index_key = f"{course_name}_{i}" # 選択状態を記憶するための一意なID
+                        
+                        st.button(
+                            f"📄 {display_str} ({file_name_short})",
+                            on_click=load_history_result,
+                            args=(entry, index_key), 
+                            key=button_key,
+                            use_container_width=True,
+                            type="secondary" ,
+                            help=tooltip_text # ★★★ ここにツールチップを追加 ★★★
+                        )
 
 # --- 8. FILE UPLOADER (複数ファイル蓄積方式) ---
 def reset_history_selection_on_upload():
@@ -577,35 +642,25 @@ if generate_button and st.session_state.uploaded_file_list:
         # report_keywords が Sidebar で定義されている前提
         final_options = {"文字数": report_words, "語彙/トーン": report_vocab, "強調キーワード": st.session_state.get('report_keywords', '')}
 
+    if 'user_id' in st.session_state:
+        save_history_entry(
+            db, # DBクライアント
+            st.session_state['user_id'], # ログイン中のユーザーID
+            generated_text, 
+            ai_success, 
+            selected_task, 
+            final_options, # 辞書
+            uploaded_file_names, 
+            lecture_name
+        )
+    else:
+        st.sidebar.warning("ログインしていないため、履歴は保存されませんでした。", icon="🔒")
     # ★★★ この行が、重複なく履歴を保存する鍵です ★★★
     # lecture_name も AI処理ブロックの先頭で定義されている前提
-    save_history_entry(generated_text, ai_success, selected_task, final_options, uploaded_file_names, lecture_name)
+    save_history_entry(db,user_id,generated_text, ai_success, selected_task, final_options, uploaded_file_names, lecture_name)
     # -----------------------------------------
 
-    # --- Final Cleanup Block ---
-    # This block executes sequentially after history saving
-    
-    # ... (この後にクリーンアップコードが続く) ...
-    
-    # --- 履歴保存処理を関数呼び出しに置き換え (NameError解消の修正) ---
-    # 履歴保存に必要な final_options をここで定義
-    final_options = {}
-    
-    if selected_task == "問題を生成する":
-        # Sidebarから取得した変数を使って辞書を作成
-        final_options = {"難易度": difficulty, "形式": format_type, "焦点": professor_focus}
-    elif selected_task == "要約を作成する":
-        final_options = {"長さ": summary_length}
-    elif selected_task == "リアクションペーパー作成":
-        # report_keywords が Sidebar で定義されている前提
-        final_options = {"文字数": report_words, "語彙/トーン": report_vocab, "強調キーワード": st.session_state.get('report_keywords', '')}
 
-    # ★★★ この行が、重複なく履歴を保存する鍵です ★★★
-    # lecture_name も AI処理ブロックの先頭で定義されている前提
-    save_history_entry(generated_text, ai_success, selected_task, final_options, uploaded_file_names, lecture_name)
-    # -----------------------------------------
-
-    # -----------------------------------------
 
     # --- Final Cleanup Block ---
     
