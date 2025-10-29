@@ -7,3 +7,4 @@ langchain-google-genai # バージョン指定を削除し、互換性のある�
 protobuf==4.25.3
 google-api-core>=1.34.1,<3.0.0
 setuptools>=65.5.1
+firebase-admin
