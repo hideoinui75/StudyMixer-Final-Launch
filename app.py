@@ -71,7 +71,6 @@ def save_history_entry(db, user_id, generated_text, ai_success, selected_task, o
         if st.session_state['analysis_history']: # 既に履歴がある場合
             last_entry = st.session_state['analysis_history'][0] # メモリ上の最新履歴
             
-            # タイムスタンプを除外して比較
             if (last_entry.get('file_name') == history_entry_data.get('file_name') and
                 last_entry.get('task') == history_entry_data.get('task') and
                 last_entry.get('lecture_name') == history_entry_data.get('lecture_name') and
@@ -82,13 +81,20 @@ def save_history_entry(db, user_id, generated_text, ai_success, selected_task, o
 
         # 3. ★★★ 重複でなければ「一度だけ」保存する ★★★
         if not is_duplicate:
-            # Firestore (DB) への保存
-            doc_ref = db.collection(f"users/{user_id}/analysis_history").document()
-            doc_ref.set(history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
-            st.sidebar.info("分析結果をデータベースに保存しました。", icon="💾")
+            
+            # ★★★ 修正点：ログイン時 (db と user_id がある場合) のみ Firestore に保存 ★★★
+            if db and user_id:
+                doc_ref = db.collection(f"users/{user_id}/analysis_history").document()
+                doc_ref.set(history_entry_data)
+                st.sidebar.info("分析結果をデータベースに保存しました。", icon="💾")
+            
+            # ★ 未ログイン時 (db と user_id がない場合) は警告を出す ★
+            elif ai_success: # ログインしておらず、AI処理は成功した場合
+                st.sidebar.warning("ログインしていないため、履歴は一時的です。", icon="🔒")
 
-            # Session Stateへの保存 (即時反映のため)
-            st.session_state['analysis_history'].insert(0, history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
+            # ★ 修正点：Session Stateへの保存は「常に行う」 ★
+            # (DB保存が失敗しても、一時メモリには保存する)
+            st.session_state['analysis_history'].insert(0, history_entry_data) 
             st.session_state.just_saved_history = True
 
             # 4. 履歴の最大件数を制限
@@ -96,8 +102,8 @@ def save_history_entry(db, user_id, generated_text, ai_success, selected_task, o
                 st.session_state['analysis_history'] = st.session_state['analysis_history'][:MAX_HISTORY]
         
     except Exception as hist_e:
-         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}") # ここで NameError が捕捉されていました
-# --- END FUNCTION: HISTORY CALLBACK ---
+         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
+# --- END FUNCTION: HISTORY CALLBACK --
 
 # --- 4. SESSION STATE INITIALIZATION ---
 # 永続化（load_data）を削除し、空のリストまたはデフォルト値で初期化
@@ -311,99 +317,94 @@ with st.sidebar:
     # --- 履歴表示 ---
     # History Selection (Display in Sidebar)
     st.markdown("---")
-    
-    # --- 履歴のフォルダビュー (講義別フィルター) ---
     st.header("📂 履歴リスト")
 
-    # 1. ログイン状態の確認
     if 'user_id' not in st.session_state:
-        st.caption("ログインすると履歴が表示されます。")
-    
-    # ログインしている場合
-    else:
-        # 2. ★★★ Firestore (DB) から履歴を読み込む ★★★
+        st.caption("（ログインすると履歴が永続的に保存されます）")
+    # 1. ★★★ ログイン時のみ、DBから履歴を読み込む ★★★
+    if 'user_id' in st.session_state:
         try:
             user_id = st.session_state['user_id']
-            # .order_by("timestamp", DESCENDING) で新しい順に
-            # .limit(MAX_HISTORY) で最大件数を取得 (MAX_HISTORYはファイル上部で定義)
             history_ref = db.collection(f"users/{user_id}/analysis_history").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(MAX_HISTORY)
-            
-            # 読み込んだ履歴を st.session_state に格納
+            # DBから読み込んだ内容で session_state を上書き
             st.session_state['analysis_history'] = [doc.to_dict() for doc in history_ref.stream()]
-            
         except Exception as db_error:
             st.error(f"履歴の読み込みに失敗しました: {db_error}", icon="🔥")
             st.session_state['analysis_history'] = [] # エラー時は空にする
+    
+    # 2. ★★★ 履歴の表示 (ログイン状態に関わらず、session_state の内容を表示) ★★★
+    
+    # 履歴が空かどうかの表示
+    if not st.session_state['analysis_history']:
+        st.caption("まだ履歴はありません。")
+        
+            
+    else:
+        # 講義名でグループ化
+        history_by_course = {}
+        for entry in st.session_state['analysis_history']:
+            # ログインしていない場合、DBからロードされたタイムスタンプがない可能性があるため .get() を使う
+            course_name = entry.get('lecture_name', '（無題の分析）') 
+            if course_name not in history_by_course:
+                history_by_course[course_name] = []
+            history_by_course[course_name].append(entry)
+        
+        # コールバック関数 (結果ロード)
+        def load_history_result(entry, index_key):
+            st.session_state['generated_content'] = entry['result']
+            st.session_state.displayed_history_index = index_key
+            # チャットコンテキストも更新
+            st.session_state.chat_context = entry['result']
+            st.session_state.chat_history = [] 
+            st.session_state.chat_context_title = f"{entry.get('task', 'タスク')} - {entry.get('file_name', 'ファイル')}"
+            initial_message = f"「{entry.get('file_name', 'ファイル')}」の履歴を読み込みました。この内容について質問どうぞ。"
+            st.session_state.chat_history.append({"role": "model", "parts": [{"text": initial_message}]})
+            st.rerun()
 
-        # 3. 履歴が空かどうかの表示
-        if not st.session_state['analysis_history']:
-            st.caption("まだ履歴はありません。")
+        # どのフォルダもデフォルトで開いておくか
+        default_expanded = len(history_by_course) < 3 
+        
+        for course_name, entries in history_by_course.items():
             
-        # 4. ★★★ 読み込んだ履歴をグループ化して表示 ★★★
-        else:
-            history_by_course = {}
-            for entry in st.session_state['analysis_history']:
-                course_name = entry.get('lecture_name', '（無題の分析）') 
-                if course_name not in history_by_course:
-                    history_by_course[course_name] = []
-                history_by_course[course_name].append(entry)
-            
-            # コールバック関数 (ボタンクリック時に結果をロード)
-            def load_history_result(entry, index_key):
-                st.session_state['generated_content'] = entry['result']
-                st.session_state.displayed_history_index = index_key
+            with st.expander(f"📁 {course_name} ({len(entries)}件)", expanded=default_expanded):
                 
-
-            # どのフォルダもデフォルトで開いておくか
-            default_expanded = len(history_by_course) < 3 
-            
-            for course_name, entries in history_by_course.items():
-                
-                with st.expander(f"📁 {course_name} ({len(entries)}件)", expanded=default_expanded):
+                for i, entry in enumerate(entries):
+                    display_str = entry.get('task', 'タスク不明')
+                    options = entry.get('options', {})
+                    if display_str == "問題を生成する":
+                        difficulty_str = options.get('難易度', '?')
+                        format_str = options.get('形式', '?')
+                        display_str += f" [{format_str}, {difficulty_str}]"
+                    elif display_str == "要約を作成する":
+                         length_str = options.get('長さ', '?')
+                         display_str += f" [長さ: {length_str}]"
+                    elif display_str == "リアクションペーパー作成":
+                         vocab_str = options.get('語彙/トーン', '?')
+                         display_str += f" [トーン: {vocab_str}]"
                     
-                    # フォルダ内の履歴をボタンとして表示 (時系列順)
-                    for i, entry in enumerate(entries):
-                        # ボタンの表示名を作成 (タスク + オプション)
-                        display_str = f"{entry['task']}"
-                        options = entry.get('options', {})
-                        if entry['task'] == "問題を生成する":
-                            difficulty_str = options.get('難易度', '?')
-                            format_str = options.get('形式', '?')
-                            display_str += f" [{format_str}, {difficulty_str}]"
-                        elif entry['task'] == "要約を作成する":
-                             length_str = options.get('長さ', '?')
-                             display_str += f" [長さ: {length_str}]"
-                        elif entry['task'] == "リアクションペーパー作成":
-                             vocab_str = options.get('語彙/トーン', '?')
-                             display_str += f" [トーン: {vocab_str}]"
-
-                        # --- 2. ★★★ ツールチップ用の詳細テキストを作成 ★★★ ---
-                        tooltip_text = f"""
-                        タスク: {entry['task']}
-                        講義名: {entry.get('lecture_name', '未分類')}
-                        ファイル: {entry['file_name']}
-                        """
-                        if entry['options']:
-                            options_str = ", ".join([f"{k}: {v}" for k, v in entry['options'].items() if v])
-                            tooltip_text += f"オプション: {options_str}\n"
-                        
-            # --- ツールチップ作成ここまで ---
-                        # ファイル名の一部を追加
-                        file_name_short = entry['file_name'].split(',')[0][:15] + "..."
-                        
-                        # ボタンの一意なキーを作成
-                        button_key = f"history_{course_name}_{i}"
-                        index_key = f"{course_name}_{i}" # 選択状態を記憶するための一意なID
-                        
-                        st.button(
-                            f"📄 {display_str} ({file_name_short})",
-                            on_click=load_history_result,
-                            args=(entry, index_key), 
-                            key=button_key,
-                            use_container_width=True,
-                            type="secondary" ,
-                            help=tooltip_text # ★★★ ここにツールチップを追加 ★★★
-                        )
+                    file_name_short = entry.get('file_name', 'ファイル不明').split(',')[0][:15] + "..."
+                    
+                    tooltip_text = f"""
+                    タスク: {entry.get('task', 'タスク不明')}
+                    講義名: {entry.get('lecture_name', '未分類')}
+                    ファイル: {entry.get('file_name', 'ファイル不明')}
+                    """
+                    if options:
+                        options_str = ", ".join([f"{k}: {v}" for k, v in options.items() if v])
+                        tooltip_text += f"オプション: {options_str}\n"
+                    
+                    button_key = f"history_{course_name}_{i}"
+                    index_key = f"{course_name}_{i}" 
+                    
+                    st.button(
+                        f"📄 {display_str} ({file_name_short})",
+                        on_click=load_history_result,
+                        args=(entry, index_key), 
+                        key=button_key,
+                        use_container_width=True,
+                        type="secondary" ,
+                        help=tooltip_text 
+                    )
 
 # --- 8. FILE UPLOADER (複数ファイル蓄積方式) ---
 def reset_history_selection_on_upload():
@@ -451,7 +452,7 @@ if st.session_state.uploaded_file_list:
         st.session_state.uploaded_file_list = []
         st.rerun()
         
-st.markdown("---")
+
 
 # --- 9. AI PROCESSING LOGIC ---
 if generate_button and st.session_state.uploaded_file_list:
@@ -664,13 +665,18 @@ if generate_button and st.session_state.uploaded_file_list:
             lecture_name
         )
     else:
-        # ログインしていない場合は、Session Stateにのみ一時保存 (DBには保存しない)
-        if ai_success:
-            st.sidebar.warning("ログインしていないため、履歴は一時的です。", icon="🔒")
-            # (ログインしていない場合のローカル保存ロジックも必要ならここに追加)
-            # (もしログインなしでもローカル履歴に保存したい場合は、別の関数呼び出しが必要)
-    # ★★★ この行が、重複なく履歴を保存する鍵です ★★★
-    # lecture_name も AI処理ブロックの先頭で定義されている前提
+        # 未ログイン時：dbとuser_idに「None」を渡して、8個の引数を合わせる
+        st.sidebar.warning("ログインしていないため、履歴は一時的です。", icon="🔒")
+        save_history_entry(
+            None, # 1. db (None)
+            None, # 2. user_id (None)
+            generated_text, # 3. generated_text
+            ai_success, # 4. ai_success
+            selected_task, # 5. selected_task
+            final_options, # 6. options (辞書)
+            uploaded_file_names, # 7. uploaded_file_names (リスト)
+            lecture_name # 8. lecture_name
+        )
     
     # -----------------------------------------
 
