@@ -34,6 +34,15 @@ width: 350px !important; /* ここで幅を指定 (例: 350px) */
 """,
 unsafe_allow_html=True,
 )
+# Streamlitのフッター（"Made with Streamlit"など）を非表示にする
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
 # --- FUNCTION: HISTORY CALLBACK (履歴保存関数) ---
 def save_history_entry(db, user_id, generated_text, ai_success, selected_task, options, uploaded_file_names, lecture_name):
