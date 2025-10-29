@@ -12,6 +12,10 @@ import time
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import CharacterTextSplitter
 
+import firebase_admin
+from firebase_admin import credentials, firestore
+import json
+
 # --- 2. THEME CONFIG ---
 st.set_page_config(
     page_title="Study-Mixer",
@@ -30,57 +34,70 @@ width: 350px !important; /* ここで幅を指定 (例: 350px) */
 """,
 unsafe_allow_html=True,
 )
+# Streamlitのフッター（"Made with Streamlit"など）を非表示にする
+hide_streamlit_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}            
+            div[data-testid="stDecoration"] {visibility: hidden;} 
+            </style>
+            """
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-
-# --- 3. HISTORY SAVE FUNCTION ---
-# 履歴保存関数 (JSON永続化は削除)
-def save_history_entry(generated_text, ai_success, selected_task, difficulty, format_type, professor_focus, summary_length, file_name_str, selected_course, report_words=None, report_vocab=None, report_keywords=None):
-    """AI処理が成功した場合にのみ履歴を保存する関数"""
+# --- FUNCTION: HISTORY CALLBACK (履歴保存関数) ---
+def save_history_entry(db, user_id, generated_text, ai_success, selected_task, options, uploaded_file_names, lecture_name):
+    """AI処理が成功した場合にのみ履歴を保存する関数 (DB対応・重複防止修正)"""
     
     if not ai_success:
         st.sidebar.warning("AI処理が成功しなかったため、履歴は保存されませんでした。", icon="⚠️")
         return 
 
     try:
-        current_options = {}
-        if selected_task == "問題を生成する":
-            current_options = {"難易度": difficulty, "形式": format_type, "焦点": professor_focus}
-        elif selected_task == "要約を作成する":
-            current_options = {"長さ": summary_length}
-        elif selected_task == "リアクションペーパー作成":
-            current_options = {"文字数": report_words, "語彙/トーン": report_vocab, "強調キーワード": report_keywords}      
-
-        history_entry = {
-            "file_name": file_name_str, # 連結されたファイル名文字列
+        file_list_str = ", ".join(uploaded_file_names)
+        
+        # 1. これから保存する履歴データを作成
+        history_entry_data = {
+            "file_name": file_list_str, 
             "task": selected_task,
-            "course": selected_course, # 講義フォルダ機能
-            "options": current_options, 
-            "result": generated_text
+            "options": options, 
+            "result": generated_text,
+            "lecture_name": lecture_name,
+            "timestamp": firestore.SERVER_TIMESTAMP 
         }
 
-        # 厳密な重複チェック (最新のエントリと比較)
+        # 2. ★★★ 重複チェックを「先」に行う ★★★
         is_duplicate = False
-        if st.session_state['analysis_history']:
-            last_entry = st.session_state['analysis_history'][0]
-            if (last_entry['file_name'] == history_entry['file_name'] and
-                last_entry['task'] == history_entry['task'] and
-                last_entry['course'] == history_entry['course'] and # 講義フォルダもチェック
-                len(last_entry['result']) == len(history_entry['result'])):
+        if st.session_state['analysis_history']: # 既に履歴がある場合
+            last_entry = st.session_state['analysis_history'][0] # メモリ上の最新履歴
+            
+            # タイムスタンプを除外して比較
+            if (last_entry.get('file_name') == history_entry_data.get('file_name') and
+                last_entry.get('task') == history_entry_data.get('task') and
+                last_entry.get('lecture_name') == history_entry_data.get('lecture_name') and
+                len(last_entry.get('result','')) == len(history_entry_data.get('result',''))):
+                
                 is_duplicate = True
+                st.sidebar.warning("重複した履歴のため保存をスキップしました。", icon="ℹ️")
 
+        # 3. ★★★ 重複でなければ「一度だけ」保存する ★★★
         if not is_duplicate:
-            st.session_state['analysis_history'].insert(0, history_entry)
-            st.session_state.just_saved_history = True # 成功フラグを立てる
+            # Firestore (DB) への保存
+            doc_ref = db.collection(f"users/{user_id}/analysis_history").document()
+            doc_ref.set(history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
+            st.sidebar.info("分析結果をデータベースに保存しました。", icon="💾")
 
-            # 履歴の最大件数を制限
-            MAX_HISTORY = 100
+            # Session Stateへの保存 (即時反映のため)
+            st.session_state['analysis_history'].insert(0, history_entry_data) # ★ 正しい変数 'history_entry_data' を使用
+            st.session_state.just_saved_history = True
+
+            # 4. 履歴の最大件数を制限
             if len(st.session_state['analysis_history']) > MAX_HISTORY:
                 st.session_state['analysis_history'] = st.session_state['analysis_history'][:MAX_HISTORY]
-            
-            # save_data() 呼び出し削除
-            
+        
     except Exception as hist_e:
-         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}")
+         st.sidebar.error(f"履歴保存中にエラーが発生しました: {hist_e}") # ここで NameError が捕捉されていました
+# --- END FUNCTION: HISTORY CALLBACK ---
 
 # --- 4. SESSION STATE INITIALIZATION ---
 # 永続化（load_data）を削除し、空のリストまたはデフォルト値で初期化
@@ -95,9 +112,13 @@ if 'last_generated_ref' not in st.session_state:
 if 'just_saved_history' not in st.session_state:
     st.session_state.just_saved_history = False
 if 'chat_history' not in st.session_state: # ★★★ チャット履歴を追加 ★★★
-    st.session_state.chat_history = []
+    st.session_state.chat_history = [
+        {"role": "model", "parts": [{"text": "チャットを開始するには、まず資料をアップロードし、サイドバーの実行ボタンを押して分析を実行してください。"}]}
+    ]
 if 'chat_context_title' not in st.session_state: # ★★★ コンテキストタイトルを追加 ★★★
     st.session_state.chat_context_title = "（資料未選択)"
+
+MAX_HISTORY = 10    
 
 # ★ 講義フォルダ機能 (永続化なし) ★
 if 'course_folders' not in st.session_state:
@@ -124,8 +145,80 @@ except Exception as e:
     st.error(f"APIキーの設定中に予期せぬエラーが発生しました: {e}")
     st.stop()
 
+# ★★★ Firebase (Login) Initialization ★★★
+# Run this only once, at the start of the app
+@st.cache_resource
+def init_firebase():
+    try:
+        # 1. st.secretsから「読み取り専用」のデータを取得
+        service_account_config = st.secrets["firebase_service_account"] 
+        
+        # 2. ★★★ 修正箇所：通常の辞書に「コピー」する ★★★
+        # (st.secretsオブジェクトは変更できないため、変更可能なコピーを作成)
+        mutable_service_account_dict = dict(service_account_config)
+        # --------------------------------------------------
+        
+        # 3. 「コピー」した辞書の内容を修正する
+        if "private_key" in mutable_service_account_dict and isinstance(mutable_service_account_dict["private_key"], str):
+             mutable_service_account_dict["private_key"] = mutable_service_account_dict["private_key"].replace("\\n", "\n")
+            
+        # 4. 「コピー」した（修正済みの）辞書を使って初期化
+        cred = credentials.Certificate(mutable_service_account_dict) 
+        
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        
+        return firestore.client()
+        
+    except KeyError:
+        st.error("エラー: FirebaseのサービスアカウントキーがSecretsに正しく設定されていません。(Hint: [firebase_service_account] セクションを確認してください)", icon="🔥")
+        st.stop()
+    except Exception as e:
+        st.error(f"Firebase初期化エラー: {e}", icon="🔥")
+        st.stop()
+
+# dbクライアントをグローバルに取得
+db = init_firebase()
+# ★★★ End Firebase Initialization ★★★
+# ★★★ End Firebase Initialization ★★★   
+
 # --- 7. UI CONTROLS (Sidebar) ---
 with st.sidebar:
+
+    # ★★★ ここからログインUIを挿入 ★★★
+    st.header("🔑 ログイン")
+    
+    # ユーザーIDがセッションステートに保存されていなければ、ログインUIを表示
+    if 'user_id' not in st.session_state:
+        st.caption("テスト用のユーザーIDを入力してください。")
+        # 以前のキー(login_input_main)と競合しないよう、新しいキー 'login_input_sidebar' を使用
+        test_user_id = st.text_input(
+            "ユーザーID (テスト用)", 
+            key="login_input_sidebar", 
+            placeholder="例: user_A"
+        )
+        
+        if st.button("ログイン", key="login_button_sidebar", use_container_width=True):
+            if test_user_id:
+                st.session_state['user_id'] = test_user_id
+                st.session_state['analysis_history'] = [] 
+                st.rerun() 
+            else:
+                st.warning("ユーザーIDを入力してください。")
+    
+    # ログイン中の場合
+    else:
+        user_id = st.session_state['user_id']
+        st.success(f"ログイン中: **{user_id}**", icon="✅")
+        
+        if st.button("ログアウト", key="logout_button_sidebar", use_container_width=True):
+            # セッションステートをクリア
+            for key in st.session_state.keys():
+                del st.session_state[key]
+            st.rerun() 
+            
+    st.markdown("---")
+    # ★★★ ログインUIここまで ★★★
     # --- タスク選択 ---
     st.header("⚙️ 実行したいタスクを選択")
     
@@ -162,7 +255,7 @@ with st.sidebar:
 
     # --- 生成ボタン ---
     button_label = f"{selected_task} ( {len(st.session_state.uploaded_file_list)}件の資料 )"
-    generate_button = st.button(button_label, key="generate_button", use_container_width=True) 
+    generate_button = st.button(button_label, key="generate_button", use_container_width=True,type="primary") 
 
     # --- 講義フォルダ管理 ---
     st.header("📚 講義フォルダ管理")
@@ -216,53 +309,101 @@ with st.sidebar:
     
 
     # --- 履歴表示 ---
-    st.markdown("---") 
-    st.header("📄 分析履歴")
+    # History Selection (Display in Sidebar)
+    st.markdown("---")
+    
+    # --- 履歴のフォルダビュー (講義別フィルター) ---
+    st.header("📂 履歴リスト")
 
-    # 講義フォルダで履歴をフィルタリング
-    filtered_history = [e for e in st.session_state['analysis_history'] if e.get('course') == st.session_state.selected_course]
-
-    if not filtered_history:
-        st.caption(f"講義フォルダ **{st.session_state.selected_course}** に履歴はありません。")
+    # 1. ログイン状態の確認
+    if 'user_id' not in st.session_state:
+        st.caption("ログインすると履歴が表示されます。")
+    
+    # ログインしている場合
     else:
-        history_titles = []
-        for i, entry in enumerate(filtered_history):
-            display_str = f"[{entry['task']}] {entry['file_name'][:25]}..."
-            history_titles.append(f"{i+1}: {display_str}")
+        # 2. ★★★ Firestore (DB) から履歴を読み込む ★★★
+        try:
+            user_id = st.session_state['user_id']
+            # .order_by("timestamp", DESCENDING) で新しい順に
+            # .limit(MAX_HISTORY) で最大件数を取得 (MAX_HISTORYはファイル上部で定義)
+            history_ref = db.collection(f"users/{user_id}/analysis_history").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(MAX_HISTORY)
+            
+            # 読み込んだ履歴を st.session_state に格納
+            st.session_state['analysis_history'] = [doc.to_dict() for doc in history_ref.stream()]
+            
+        except Exception as db_error:
+            st.error(f"履歴の読み込みに失敗しました: {db_error}", icon="🔥")
+            st.session_state['analysis_history'] = [] # エラー時は空にする
 
-        options_with_placeholder = ["履歴を選択..."] + history_titles
+        # 3. 履歴が空かどうかの表示
+        if not st.session_state['analysis_history']:
+            st.caption("まだ履歴はありません。")
+            
+        # 4. ★★★ 読み込んだ履歴をグループ化して表示 ★★★
+        else:
+            history_by_course = {}
+            for entry in st.session_state['analysis_history']:
+                course_name = entry.get('lecture_name', '（無題の分析）') 
+                if course_name not in history_by_course:
+                    history_by_course[course_name] = []
+                history_by_course[course_name].append(entry)
+            
+            # コールバック関数 (ボタンクリック時に結果をロード)
+            def load_history_result(entry, index_key):
+                st.session_state['generated_content'] = entry['result']
+                st.session_state.displayed_history_index = index_key
+                
 
-        selected_history_display = st.selectbox(
-            f"過去の分析結果を選択 (フォルダ: {st.session_state.selected_course}):",
-            options=options_with_placeholder,
-            index=0, 
-            key="history_selectbox_display"
-        )
-        
-        # ★ 履歴閲覧バグ修正 ★
-        if selected_history_display != "履歴を選択..." and not generate_button:
-            try:
-                selected_index = options_with_placeholder.index(selected_history_display) - 1
-                selected_entry = filtered_history[selected_index]
+            # どのフォルダもデフォルトで開いておくか
+            default_expanded = len(history_by_course) < 3 
+            
+            for course_name, entries in history_by_course.items():
                 
-                st.subheader(f"選択履歴 {selected_index + 1} の詳細:")
-                st.caption(f"**タスク:** {selected_entry['task']}")
-                st.caption(f"**ファイル:** {selected_entry['file_name']}")
-                st.caption(f"**フォルダ:** {selected_entry.get('course', '未分類')}")
-                
-                if selected_entry['options']:
-                    st.markdown("---")
-                    st.caption("**実行オプション:**")
-                    for k, v in selected_entry['options'].items():
-                         st.write(f"- **{k}**: {v}")
-                
-                if st.session_state.get('displayed_history_index') != selected_index:
-                    st.session_state['generated_content'] = selected_entry['result']
-                    st.session_state.displayed_history_index = selected_index
-                    st.rerun() 
+                with st.expander(f"📁 {course_name} ({len(entries)}件)", expanded=default_expanded):
+                    
+                    # フォルダ内の履歴をボタンとして表示 (時系列順)
+                    for i, entry in enumerate(entries):
+                        # ボタンの表示名を作成 (タスク + オプション)
+                        display_str = f"{entry['task']}"
+                        options = entry.get('options', {})
+                        if entry['task'] == "問題を生成する":
+                            difficulty_str = options.get('難易度', '?')
+                            format_str = options.get('形式', '?')
+                            display_str += f" [{format_str}, {difficulty_str}]"
+                        elif entry['task'] == "要約を作成する":
+                             length_str = options.get('長さ', '?')
+                             display_str += f" [長さ: {length_str}]"
+                        elif entry['task'] == "リアクションペーパー作成":
+                             vocab_str = options.get('語彙/トーン', '?')
+                             display_str += f" [トーン: {vocab_str}]"
 
-            except (ValueError, IndexError):
-                 st.sidebar.warning("履歴の表示中にエラーが発生しました。", icon="⚠️")
+                        # --- 2. ★★★ ツールチップ用の詳細テキストを作成 ★★★ ---
+                        tooltip_text = f"""
+                        タスク: {entry['task']}
+                        講義名: {entry.get('lecture_name', '未分類')}
+                        ファイル: {entry['file_name']}
+                        """
+                        if entry['options']:
+                            options_str = ", ".join([f"{k}: {v}" for k, v in entry['options'].items() if v])
+                            tooltip_text += f"オプション: {options_str}\n"
+                        
+            # --- ツールチップ作成ここまで ---
+                        # ファイル名の一部を追加
+                        file_name_short = entry['file_name'].split(',')[0][:15] + "..."
+                        
+                        # ボタンの一意なキーを作成
+                        button_key = f"history_{course_name}_{i}"
+                        index_key = f"{course_name}_{i}" # 選択状態を記憶するための一意なID
+                        
+                        st.button(
+                            f"📄 {display_str} ({file_name_short})",
+                            on_click=load_history_result,
+                            args=(entry, index_key), 
+                            key=button_key,
+                            use_container_width=True,
+                            type="secondary" ,
+                            help=tooltip_text # ★★★ ここにツールチップを追加 ★★★
+                        )
 
 # --- 8. FILE UPLOADER (複数ファイル蓄積方式) ---
 def reset_history_selection_on_upload():
@@ -271,7 +412,7 @@ def reset_history_selection_on_upload():
 # ★「multiple=True」のエラー回避ロジック ★
 newly_uploaded_file = st.file_uploader(
     f"資料を1つずつアップロード (保存先: **{st.session_state.selected_course}**)",
-    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav"],
+    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav",".heic", ".m4a"],
     key="file_uploader_single", # キー名を変更
     on_change=reset_history_selection_on_upload
     # multiple=True は使用しない
@@ -335,6 +476,17 @@ if generate_button and st.session_state.uploaded_file_list:
     uploaded_gemini_files = [] 
     temp_file_paths = []       
     contents_for_model = []    
+    uploaded_file_names = []
+
+    # ★★★ 講義名決定ロジックをここに移動 ★★★
+    input_value = st.session_state.get('lecture_name_input', '')
+    if not input_value and uploaded_files:
+        lecture_name = uploaded_files[0].name
+    elif not input_value:
+        lecture_name = "（無題の分析）" 
+    else:
+        lecture_name = input_value 
+    # -----------------------------------------------
 
     try: # Outer try for all processing steps
        total_files = len(uploaded_files)
@@ -375,7 +527,7 @@ if generate_button and st.session_state.uploaded_file_list:
                 except Exception as pdf_error:
                     raise Exception(f"ファイル {uploaded_file.name} でPDF解析エラー: {pdf_error}") 
 
-            elif file_extension in [".jpg", ".jpeg", ".png", ".mp3", ".wav"]:
+            elif file_extension in [".jpg", ".jpeg", ".png", ".mp3", ".wav",".heic", ".m4a"]:
                 progress_bar.progress(progress_percent + 70, text=f"[{i+1}/{total_files}] ファイル処理完了。") 
 
             else: 
@@ -458,25 +610,71 @@ if generate_button and st.session_state.uploaded_file_list:
         st.error(error_message)
         generated_text = error_message
 
-    # --- Save Result to Session State ---
+# --- Save Result to Session State (Always happens) ---
     st.session_state['generated_content'] = generated_text
 
-    # --- 履歴保存処理の呼び出し ---
-    save_history_entry(
-        generated_text, 
-        ai_success, 
-        selected_task, 
-        difficulty, 
-        format_type, 
-        professor_focus, 
-        summary_length, 
-        file_names_str, # 連結ファイル名文字列
-        st.session_state.selected_course, # 講義フォルダ
-        report_words=report_words,
-        report_vocab=report_vocab,
-        report_keywords=report_keywords
-    )
+    # --- チャットコンテキストも同時に更新 (ここが新しい修正) ---
+    if ai_success: # AIが成功した場合のみ
+        st.session_state.chat_context = generated_text # 分析結果をチャットの知識ベースに設定
+        st.session_state.chat_history = [] # 新しい分析結果でチャット履歴をリセット
+        
+        # ★★★ 修正箇所：uploaded_file_names が空でないかチェック ★★★
+        if uploaded_file_names: # リストが空でないことを確認
+            first_file_name = uploaded_file_names[0]
+            display_file_name = first_file_name[:20] + "..." if len(first_file_name) > 20 else first_file_name
+            st.session_state.chat_context_title = f"最新の分析結果 ({display_file_name})" 
+            initial_message = f"「{display_file_name}」の分析完了！この資料について何か質問はありますか？"
+        else:
+            # リストが空だった場合の代替
+            st.session_state.chat_context_title = "最新の分析結果" 
+            initial_message = "分析完了！この資料について何か質問はありますか？"
+        
+        # ★★★ 修正箇所：成功時のAIからの最初の挨拶を、上記の if/else ブロックで定義した initial_message を使う ★★★
+        st.session_state.chat_history.append({"role": "model", "parts": [{"text": initial_message}]})
+        # ----------------------------------------------------
+
+    else: # AIが失敗した場合
+        st.session_state.chat_context = generated_text # エラーメッセージをコンテキストに設定
+        st.session_state.chat_history = []
+        st.session_state.chat_context_title = "分析エラー"
+    # ------------------------------------------------
+    
+    # --- 履歴保存処理を関数呼び出しに置き換え (NameError解消の修正) ---
+    # 履歴保存に必要な final_options をここで定義
+    final_options = {}
+    
+    if selected_task == "問題を生成する":
+        # Sidebarから取得した変数を使って辞書を作成
+        final_options = {"難易度": difficulty, "形式": format_type, "焦点": professor_focus}
+    elif selected_task == "要約を作成する":
+        final_options = {"長さ": summary_length}
+    elif selected_task == "リアクションペーパー作成":
+        # report_keywords が Sidebar で定義されている前提
+        final_options = {"文字数": report_words, "語彙/トーン": report_vocab, "強調キーワード": st.session_state.get('report_keywords', '')}
+
+    if 'user_id' in st.session_state:
+        save_history_entry(
+            db, # DBクライアント
+            user_id,
+            generated_text, 
+            ai_success, 
+            selected_task, 
+            final_options, # 辞書
+            uploaded_file_names, 
+            lecture_name
+        )
+    else:
+        # ログインしていない場合は、Session Stateにのみ一時保存 (DBには保存しない)
+        if ai_success:
+            st.sidebar.warning("ログインしていないため、履歴は一時的です。", icon="🔒")
+            # (ログインしていない場合のローカル保存ロジックも必要ならここに追加)
+            # (もしログインなしでもローカル履歴に保存したい場合は、別の関数呼び出しが必要)
+    # ★★★ この行が、重複なく履歴を保存する鍵です ★★★
+    # lecture_name も AI処理ブロックの先頭で定義されている前提
+    
     # -----------------------------------------
+
+
 
     # --- Final Cleanup Block ---
     
@@ -506,58 +704,118 @@ if st.session_state['generated_content']:
     st.header("--- AI生成結果 ---")
     st.markdown(st.session_state['generated_content'])
 
-# --- 8.5 CHAT INTERFACE (Main Area) --- # ★★★ このセクションを新規挿入 ★★★
+# --- 8.5 CHAT INTERFACE (Main Area) --- 
 st.markdown("---")
-st.subheader("💬 資料深掘りチャット") # ★ st.header から st.subheader に変更 ★
+st.subheader("💬 資料深掘りチャット") 
 st.caption(f"コンテキスト: {st.session_state.chat_context_title}")
 
-if not st.session_state.get('chat_history'):
-    st.caption("サイドバーの履歴を選択するか、AI分析を実行するとチャットを開始できます。")
-    if st.session_state.get('generated_content'):
-         st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": "分析完了！この資料について何か質問はありますか？"}]})
-         st.session_state.chat_context_title = "最新の分析結果"
-    elif not st.session_state['analysis_history']:
-         st.stop() 
+# ★★★ 修正箇所：チャット入力を条件分岐の前に移動 ★★★
+
+# ユーザー入力のプレースホルダーを先に定義
+placeholder_text = "この資料について質問を入力..."
+disabled_state = False
+
+if st.session_state.get('chat_context_title') == "（資料未選択）":
+     if uploaded_files: # ファイルはあるが、まだ分析されていない
+        st.info("サイドバーの実行ボタンを押して分析を完了すると、チャットが開始できます。", icon="💡")
+        user_query = st.chat_input("分析を実行すると入力できます...", disabled=True)
+     else: # ファイルもアップロードされていない
+        st.info("チャットを開始するには、まず資料をアップロードし、分析を実行してください。", icon="💡")
+        user_query = st.chat_input("資料をアップロードしてください...", disabled=True)
+     
+# ユーザー入力ウィジェット
+user_query = st.chat_input(placeholder_text, disabled=disabled_state)
 
 # 過去のチャット履歴を表示
 for message in st.session_state.chat_history:
-    with st.chat_message(message["role"]):
-        st.markdown(message["parts"][0]["text"])
+    role = message["role"] 
 
-# ユーザー入力
-user_query = st.chat_input("この資料について質問を入力...")
+    if role == "model":
+        avatar_icon = "🎓" # 脳（知識）のアイコン
+    elif role == "user":
+        avatar_icon = "🙂" # ユーザーアイコン
+    else:
+        continue 
+    
+    # ロールが user または model の場合のみ表示
+    if role in ["user", "model"]: 
+        with st.chat_message(role, avatar=avatar_icon): 
+            st.markdown(message["parts"][0]["text"])
+
 
 if user_query:
     
-    # ユーザーの質問を履歴に追加
+    # 1. ユーザーの質問をまず「表示用」の履歴に追加する
     st.session_state.chat_history.append({"role": "user", "parts": [{"text": user_query}]})
     
-    # コンテキストとしてメイン表示エリアの最新の結果を取得
-    current_main_result = st.session_state.get('generated_content', '（有効な資料なし）')
+    # 2. 以前のコンテキスト（分析結果）を取得
+    context_content = st.session_state.get('chat_context', '（コンテキストなし）')
+    context_title = st.session_state.get('chat_context_title', '不明な資料')
     
-    # チャットのプロンプトにコンテキストを組み込む
-    chat_prompt = f"以下のコンテキストを基に、ユーザーの質問に答えてください。コンテキストの内容以外は回答しないでください。\n\n[コンテキスト]: {current_main_result}\n\nユーザーの質問: {user_query}"
+    # 3. AIがコンテキストに基づいた役割を果たすための「指示」を構築
+    system_instruction = f"""
+    あなたはユーザーの学習をサポートする専門家です。
+    以下の[提供された資料]（タイトル: {context_title}）の内容に厳密に基づき、ユーザーの質問に回答してください。
     
-    # モデルの呼び出し
+    【重要】: 回答の際、「[分析コンテキスト]」や「[提供された資料]」という言葉は絶対に使わないでください。代わりに「この資料によると、」や「資料によれば、」といった自然な表現を使用してください。
+
+    [提供された資料]: {context_content}
+    """
+    
+    # 4. モデルの呼び出し (Gemini APIのチャット機能を使用)
     try:
-        chat_model = genai.GenerativeModel('models/gemini-2.5-flash')
+        # 5. APIに送信するためのクリーンな会話履歴 (api_contents) を構築
+        api_contents = []
         
-        # 過去の会話履歴を渡すために、contentsリストを構築
-        # (セッションステートにある履歴をそのまま使用)
-        
+        # 画面表示用の st.session_state.chat_history からAPI用のリストを作成
+        for i, msg in enumerate(st.session_state.chat_history):
+             # ロールを 'assistant' から 'model' に変換
+             role_to_use = "model" if msg["role"] == "assistant" else msg["role"]
+             
+             # APIがサポートする 'user' と 'model' ロールのみを追加
+             if role_to_use in ["user", "model"]:
+                 
+                 # ★★★ ここが最重要 ★★★
+                 # もし、これが会話の「最初の」「ユーザー」のメッセージなら、システム指示を結合する
+                 if i == len(st.session_state.chat_history) - 1 and role_to_use == "user":
+                     original_prompt = msg["parts"][0]["text"]
+                     # 最新の質問に「脳」(システム指示)を結合
+                     integrated_prompt = f"{system_instruction}\n\n[ユーザーの最新の質問]: {original_prompt}"
+                     api_contents.append({"role": "user", "parts": [{"text": integrated_prompt}]})
+                 else:
+                     # 過去の会話（AIの挨拶など）はそのまま追加
+                     api_contents.append({"role": role_to_use, "parts": msg["parts"]})
+        # --- ★★★ 会話履歴の構築ここまで ★★★ ---
+
         with st.spinner("AIが回答を作成中です..."):
-             response = chat_model.generate_content(
-                contents=st.session_state.chat_history 
+             # system_instruction 引数は使わず、構築した contents のみを渡す
+             response = genai.GenerativeModel('models/gemini-2.5-flash').generate_content(
+                contents=api_contents # 修正された会話履歴
              )
 
-        ai_response_text = response.text
-        
-        # AIの回答を履歴に追加
-        st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": ai_response_text}]})
+        # 6. 応答の安全チェック
+        is_blocked = (hasattr(response, 'candidates') and 
+                      response.candidates and 
+                      hasattr(response.candidates[0], 'finish_reason') and 
+                      response.candidates[0].finish_reason.name == "SAFETY")
 
+        if is_blocked:
+             error_message = "AIの応答が安全性フィルタによりブロックされました。別の質問を試してください。"
+             st.error(error_message, icon="🚫")
+             ai_response_text = error_message
+        elif hasattr(response, 'text') and response.text:
+             ai_response_text = response.text
+        else:
+             error_message = "AIからの応答が空か、予期せぬ形式でした。時間をおいて再試行してください。"
+             st.error(error_message, icon="❓")
+             ai_response_text = error_message
+    
     except Exception as e:
         ai_response_text = f"チャットエラー: {e}"
-        st.session_state.chat_history.append({"role": "assistant", "parts": [{"text": ai_response_text}]})
-        
-    # 画面を更新して最新のチャットを表示
-    st.rerun()
+        # エラーも履歴として表示するために role は model を使用
+        st.session_state.chat_history.append({"role": "model", "parts": [{"text": ai_response_text}]})
+        st.rerun() # エラー発生時も再実行
+    
+    else: # tryブロックが成功した場合のみ、AIの回答を履歴に追加
+        st.session_state.chat_history.append({"role": "model", "parts": [{"text": ai_response_text}]})
+        st.rerun() # 正常終了時も再実行
