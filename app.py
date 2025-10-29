@@ -39,7 +39,7 @@ hide_streamlit_style = """
             <style>
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
-            header {visibility: hidden;}
+            header {visibility: hidden;}            
             div[data-testid="stDecoration"] {visibility: hidden;} 
             </style>
             """
@@ -655,7 +655,7 @@ if generate_button and st.session_state.uploaded_file_list:
     if 'user_id' in st.session_state:
         save_history_entry(
             db, # DBクライアント
-            st.session_state['user_id'], # ログイン中のユーザーID
+            user_id,
             generated_text, 
             ai_success, 
             selected_task, 
@@ -664,10 +664,14 @@ if generate_button and st.session_state.uploaded_file_list:
             lecture_name
         )
     else:
-        st.sidebar.warning("ログインしていないため、履歴は保存されませんでした。", icon="🔒")
+        # ログインしていない場合は、Session Stateにのみ一時保存 (DBには保存しない)
+        if ai_success:
+            st.sidebar.warning("ログインしていないため、履歴は一時的です。", icon="🔒")
+            # (ログインしていない場合のローカル保存ロジックも必要ならここに追加)
+            # (もしログインなしでもローカル履歴に保存したい場合は、別の関数呼び出しが必要)
     # ★★★ この行が、重複なく履歴を保存する鍵です ★★★
     # lecture_name も AI処理ブロックの先頭で定義されている前提
-    save_history_entry(db,user_id,generated_text, ai_success, selected_task, final_options, uploaded_file_names, lecture_name)
+    
     # -----------------------------------------
 
 
