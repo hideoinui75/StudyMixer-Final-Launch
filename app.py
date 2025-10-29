@@ -158,7 +158,7 @@ with st.sidebar:
 
     # --- 生成ボタン ---
     button_label = f"{selected_task} ( {len(st.session_state.uploaded_file_list)}件の資料 )"
-    generate_button = st.button(button_label, key="generate_button", use_container_width=True) 
+    generate_button = st.button(button_label, key="generate_button", use_container_width=True,type="primary") 
 
     # --- 講義フォルダ管理 ---
     st.header("📚 講義フォルダ管理")
@@ -337,7 +337,7 @@ def reset_history_selection_on_upload():
 # ★「multiple=True」のエラー回避ロジック ★
 newly_uploaded_file = st.file_uploader(
     f"資料を1つずつアップロード (保存先: **{st.session_state.selected_course}**)",
-    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav"],
+    type=["pdf", "png", "jpg", "jpeg", "mp3", "wav",".heic", ".m4a"],
     key="file_uploader_single", # キー名を変更
     on_change=reset_history_selection_on_upload
     # multiple=True は使用しない
@@ -452,7 +452,7 @@ if generate_button and st.session_state.uploaded_file_list:
                 except Exception as pdf_error:
                     raise Exception(f"ファイル {uploaded_file.name} でPDF解析エラー: {pdf_error}") 
 
-            elif file_extension in [".jpg", ".jpeg", ".png", ".mp3", ".wav"]:
+            elif file_extension in [".jpg", ".jpeg", ".png", ".mp3", ".wav",".heic", ".m4a"]:
                 progress_bar.progress(progress_percent + 70, text=f"[{i+1}/{total_files}] ファイル処理完了。") 
 
             else: 
