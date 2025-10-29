@@ -89,7 +89,9 @@ if 'last_generated_ref' not in st.session_state:
 if 'just_saved_history' not in st.session_state:
     st.session_state.just_saved_history = False
 if 'chat_history' not in st.session_state: # ★★★ チャット履歴を追加 ★★★
-    st.session_state.chat_history = []
+    st.session_state.chat_history = [
+        {"role": "model", "parts": [{"text": "チャットを開始するには、まず資料をアップロードし、サイドバーの実行ボタンを押して分析を実行してください。"}]}
+    ]
 if 'chat_context_title' not in st.session_state: # ★★★ コンテキストタイトルを追加 ★★★
     st.session_state.chat_context_title = "（資料未選択)"
 
