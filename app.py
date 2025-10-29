@@ -516,7 +516,7 @@ if generate_button and st.session_state.uploaded_file_list:
                 try:
                     loader = PyPDFLoader(temp_file_path)
                     documents = loader.load()
-                    text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=100) 
+                    text_splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50) 
                     texts = text_splitter.split_documents(documents)
                     if not texts: 
                          raise ValueError(f"ファイル {uploaded_file.name} からテキストを抽出できませんでした。")
@@ -580,7 +580,7 @@ if generate_button and st.session_state.uploaded_file_list:
        contents_for_model.insert(0, final_prompt_text)
 
        # --- AI Request ---
-       model = genai.GenerativeModel('models/gemini-2.5-flash') 
+       model = genai.GenerativeModel('models/gemini-2.5-flash-lite') 
        progress_bar.progress(80, text="AIが処理中です... (時間がかかる場合があります)") 
 
        try: # Inner try for AI request
@@ -795,7 +795,7 @@ if user_query:
 
         with st.spinner("AIが回答を作成中です..."):
              # system_instruction 引数は使わず、構築した contents のみを渡す
-             response = genai.GenerativeModel('models/gemini-2.5-flash').generate_content(
+             response = genai.GenerativeModel('models/gemini-2.5-flash-lite').generate_content(
                 contents=api_contents # 修正された会話履歴
              )
 
