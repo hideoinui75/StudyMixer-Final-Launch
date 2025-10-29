@@ -1,0 +1,13 @@
+# .streamlit/config.toml
+
+[theme]
+# 背景色を明るい白に設定
+backgroundColor="#FFFFFF" 
+# サイドバーとウィジェットの背景をグレーに設定
+secondaryBackgroundColor="#F0F2F6" 
+# テキストの色を濃い黒に設定
+textColor="#262730" 
+# フォントは統一感のあるサンセリフ体（ゴシック系）を使用
+font="sans serif"
+[client]
+toolbarMode = "minimal"
